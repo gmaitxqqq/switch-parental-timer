@@ -1,4 +1,4 @@
-// Switch Parental Control Manager v11.4
+// Switch Parental Control Manager v11.5
 // =============================================================
 // Pure .nro homebrew app — no sysmodule required
 //
@@ -11,6 +11,7 @@
 //   - SetPlayTimerSettingsForDebug (cmd 195101) compatible with fw 22.1.0
 //   - UnlockRestrictionTemporarily (cmd 1201) reads PIN and passes it back
 //   - PlayTimerSettings layout: u16[34], per-day at [7+4n], minutes at [7+4n+2]
+//   - v11.5: PIN verification on startup — must enter correct system PIN to use app
 //
 // CRITICAL: printf requires consoleUpdate(NULL) to flush to screen!
 //
@@ -24,6 +25,8 @@
 
 // ---- Constants ----
 #define PT_DAY_NOLIMIT 0xFFFFu
+#define MAX_PIN_LEN    8
+#define DEFAULT_PIN    "8473"
 
 // Parental control safety levels
 enum {
@@ -83,6 +86,24 @@ static void pctl_status_fetch(PctlStatus *out)
         out->restriction_enabled = enabled;
         out->restriction_enabled_ok = true;
     }
+}
+
+// Read system PIN string via GetPinCode (cmd 1208)
+// Returns true if PIN was read successfully
+static bool pctl_read_pin(char *pin_out, size_t pin_buf_size, u32 *pin_len_out)
+{
+    pctl_ops_reinit();
+    Service *srv = pctlGetServiceSession_Service();
+
+    memset(pin_out, 0, pin_buf_size);
+    u32 pin_len = 0;
+    Result rc = serviceDispatchOut(srv, 1208, pin_len,
+        .buffer_attrs = { SfBufferAttr_HipcPointer | SfBufferAttr_Out },
+        .buffers      = { { pin_out, pin_buf_size } });
+    if (R_FAILED(rc)) return false;
+
+    if (pin_len_out) *pin_len_out = pin_len;
+    return true;
 }
 
 static Result pctl_set_pin(void)
@@ -236,6 +257,121 @@ static void waitForKey(void)
         consoleFlush();
         svcSleepThread(10000000ULL);
     }
+}
+
+// ---- PIN Entry Screen ----
+// Displays a digit-by-digit PIN entry UI
+// cursor: 0..(pin_max-1) = digit position
+// Each digit: 0-9, use Up/Down to change
+// A = confirm, B = exit app
+
+static bool pinEntryScreen(const char *expected_pin, u32 pin_length)
+{
+    char input[MAX_PIN_LEN + 1];
+    memset(input, '0', pin_length);
+    input[pin_length] = '\0';
+
+    int cursor = 0;
+    int attempts = 0;
+    const int max_attempts = 5;
+
+    while (appletMainLoop()) {
+        u64 k = padGetDown();
+
+        consoleClear();
+        printf("\n");
+        printSeparator();
+        printf("   PIN Verification Required\n");
+        printSeparator();
+        printf("\n");
+        printf("   Enter the system parental control\n");
+        printf("   PIN to access this app.\n\n");
+        printf("   Attempt %d / %d\n\n", attempts + 1, max_attempts);
+
+        // Display PIN digits with cursor
+        printf("   PIN:  ");
+        for (u32 i = 0; i < pin_length; i++) {
+            if (i == (u32)cursor)
+                printf("[%c]", input[i]);
+            else
+                printf(" %c ", input[i]);
+        }
+        printf("\n\n");
+
+        printf("   Up/Down: Change digit (+/-1)\n");
+        printf("   Left/Right: Move cursor\n");
+        printf("   A: Confirm   B: Exit app\n");
+        consoleFlush();
+
+        if (k & HidNpadButton_Up) {
+            if (input[cursor] < '9') input[cursor]++;
+            else input[cursor] = '0';
+        }
+        if (k & HidNpadButton_Down) {
+            if (input[cursor] > '0') input[cursor]--;
+            else input[cursor] = '9';
+        }
+        if (k & HidNpadButton_Left) {
+            if (cursor > 0) cursor--;
+        }
+        if (k & HidNpadButton_Right) {
+            if ((u32)cursor < pin_length - 1) cursor++;
+        }
+
+        if (k & HidNpadButton_B) {
+            // User chose to exit
+            return false;
+        }
+
+        if (k & HidNpadButton_A) {
+            // Verify PIN
+            if (strncmp(input, expected_pin, pin_length) == 0) {
+                // Correct!
+                consoleClear();
+                printf("\n");
+                printSeparator();
+                printf("   PIN Accepted!\n");
+                printSeparator();
+                printf("\n");
+                consoleFlush();
+                svcSleepThread(500000000ULL);  // 0.5 sec
+                return true;
+            } else {
+                // Wrong PIN
+                attempts++;
+                consoleClear();
+                printf("\n");
+                printSeparator();
+                printf("   WRONG PIN!\n");
+                printSeparator();
+                printf("\n");
+                printf("   Attempt %d / %d\n", attempts, max_attempts);
+                consoleFlush();
+                svcSleepThread(1000000000ULL);  // 1 sec
+
+                if (attempts >= max_attempts) {
+                    consoleClear();
+                    printf("\n");
+                    printSeparator();
+                    printf("   Too many wrong attempts!\n");
+                    printSeparator();
+                    printf("\n");
+                    printf("   Exiting for security.\n");
+                    consoleFlush();
+                    svcSleepThread(2000000000ULL);  // 2 sec
+                    return false;
+                }
+
+                // Reset input
+                memset(input, '0', pin_length);
+                cursor = 0;
+            }
+        }
+
+        svcSleepThread(50000000ULL);
+    }
+
+    return false;
 }
 
 // ---- Menu Screens ----
@@ -606,7 +742,7 @@ int main(int argc, char **argv)
     printf("\n");
     printSeparator();
     printf("   Switch Parental Control Manager\n");
-    printf("   v11.4 - fw 22.1.0 compatible\n");
+    printf("   v11.5 - fw 22.1.0 compatible\n");
     printSeparator();
     printf("\n");
     printf("   Initializing...\n");
@@ -627,6 +763,44 @@ int main(int argc, char **argv)
     } else {
         printf("   pctl service initialized OK.\n\n");
         consoleFlush();
+
+        // ---- PIN Verification Gate ----
+        // Try to read the system PIN
+        char system_pin[32] = {0};
+        u32 system_pin_len = 0;
+        bool has_pin = false;
+
+        if (R_SUCCEEDED(pctl_rc)) {
+            has_pin = pctl_read_pin(system_pin, sizeof(system_pin), &system_pin_len);
+        }
+
+        if (has_pin && system_pin_len > 0) {
+            // System PIN exists — require user to enter it
+            if (!pinEntryScreen(system_pin, system_pin_len)) {
+                // Wrong PIN or user chose to exit
+                if (R_SUCCEEDED(pctl_rc)) pctlExit();
+                consoleExit(NULL);
+                return 0;
+            }
+        } else {
+            // No system PIN set — use default fallback password
+            consoleClear();
+            printf("\n");
+            printSeparator();
+            printf("   Fallback Password\n");
+            printSeparator();
+            printf("\n");
+            printf("   No system PIN is set.\n");
+            printf("   Using default password for access.\n\n");
+            consoleFlush();
+            svcSleepThread(1500000000ULL);  // 1.5 sec
+
+            if (!pinEntryScreen(DEFAULT_PIN, strlen(DEFAULT_PIN))) {
+                if (R_SUCCEEDED(pctl_rc)) pctlExit();
+                consoleExit(NULL);
+                return 0;
+            }
+        }
     }
 
     int cursor = 0;
@@ -650,7 +824,7 @@ int main(int argc, char **argv)
         printf("\n");
         printSeparator();
         printf("   Switch Parental Control Manager\n");
-        printf("   v11.4 - fw 22.1.0 compatible\n");
+        printf("   v11.5 - fw 22.1.0 compatible\n");
         printSeparator();
         printf("\n");
 
