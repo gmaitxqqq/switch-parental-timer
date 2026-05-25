@@ -57,7 +57,9 @@ jobs:
           # Sysmodule: NSP goes to atmosphere/contents/
           if [ -f sysmodule/sysmodule.nsp ]; then
             cp sysmodule/sysmodule.nsp deploy/atmosphere/contents/4200000000000001/exefs.nsp
-            touch deploy/atmosphere/contents/4200000000000001/boot2.flag
+            mkdir -p deploy/atmosphere/contents/4200000000000001/flags
+            touch deploy/atmosphere/contents/4200000000000001/flags/boot2.flag
+            echo '{"name":"ParentalTimer","tid":"4200000000000001","requires_reboot":false}' > deploy/atmosphere/contents/4200000000000001/toolbox.json
             echo "Sysmodule NSP packaged"
           else
             echo "WARNING: sysmodule.nsp not found"
