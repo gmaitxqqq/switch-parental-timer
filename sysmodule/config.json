@@ -25,7 +25,12 @@
         "time:s",
         "time:u",
         "fsp-srv",
-        "hiddbg"
+        "pctl",
+        "pctl:a",
+        "pctl:s",
+        "pctl:r",
+        "pm:shell",
+        "pm:dmnt"
     ],
     "kernel_capabilities": [
         {
