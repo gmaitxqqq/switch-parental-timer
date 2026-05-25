@@ -1,4 +1,4 @@
-// ParentalTimer Companion App v9
+// ParentalTimer Companion App v10
 // =============================================================
 // NRO app launched from Homebrew Menu (Album).
 // UI: select duration -> sends command to sysmodule -> done.
@@ -63,7 +63,7 @@ int main(int argc, char **argv)
         consoleClear();
         printf("\n\n");
         printf("  ===============================\n");
-        printf("   Parental Timer Companion v9\n");
+        printf("   Parental Timer Companion v10\n");
         printf("  ===============================\n\n");
 
         if (!started) {

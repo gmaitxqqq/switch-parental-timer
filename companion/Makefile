@@ -150,6 +150,6 @@ endif
 #---------------------------------------------------------------------------------
 APP_TITLE   := ParentalTimer
 APP_AUTHOR  := Custom
-APP_VERSION := 9.0
+APP_VERSION := 10.0
 
 export APP_TITLE APP_AUTHOR APP_VERSION

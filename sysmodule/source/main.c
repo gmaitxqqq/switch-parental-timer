@@ -1,18 +1,20 @@
-// ParentalTimer Sysmodule v9
+// ParentalTimer Sysmodule v10
 // =============================================================
 // Runs as Atmosphere sysmodule (background daemon).
 // Communicates with companion NRO via file on SD card.
 //
-// v9 KEY CHANGE: Removed pctlInitialize() and all pctl IPC calls.
-// That was causing the sysmodule to crash on startup because
-// pctl:a/pctl:s services are NOT accessible from sysmodule context.
+// KEY DESIGN DECISIONS (learned from NSParentalControl):
+// 1. NEVER call pctlInitialize() - pctl service is NOT accessible
+//    from sysmodule context. NSParentalControl proves this.
+// 2. Initialize services ONLY in __appInit (before smExit)
+// 3. For services needed later (pm:shell, time), init/exit on-demand
+// 4. Use pm:shell to terminate games when time's up
+// 5. Since we can't use pctl IPC, we simply:
+//    - Terminate the game when time expires
+//    - The system's parental control remains active (if enabled)
+//    - The child's game session is forcibly ended
 //
-// Instead, we manage parental control by:
-// 1. Modifying the system's parental control config file directly
-//    (sdmc:/atmosphere/contents/... or via fs calls)
-// 2. Using pm:shell to terminate games when time's up
-//
-// PIN: 8473 (hardcoded) | Default: 15 min
+// PIN: 8473 (hardcoded, used for documentation) | Default: 15 min
 // Title ID: 0x4200000000003103
 // =============================================================
 
@@ -26,12 +28,11 @@
 #define S_1S        (1000000000ULL)
 #define CMD_PATH    "sdmc:/parental_timer.cmd"
 #define STATUS_PATH "sdmc:/parental_timer.status"
-#define PCTL_FLAG_PATH "sdmc:/parental_timer.pctl_was_on"
 
 // Timer state
 typedef enum {
     STATE_IDLE,       // Waiting for command
-    STATE_COUNTDOWN,  // Timer running, parental off
+    STATE_COUNTDOWN,  // Timer running
 } TimerState;
 
 static TimerState g_state = STATE_IDLE;
@@ -39,6 +40,8 @@ static u32 g_minutes = 0;
 static u64 g_deadline = 0;
 
 // ---- Sysmodule initialization (following NSParentalControl pattern) ----
+// This is CRITICAL: we must ONLY initialize services here, before smExit().
+// Services that need sm must be init'd here or on-demand later.
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,7 +61,7 @@ void __libnx_initheap(void)
     extern char* fake_heap_end;
 
     void* addr = NULL;
-    Result rc = svcSetHeapSize(&addr, 0x280000); // 2.5MB heap (same as NSParentalControl)
+    Result rc = svcSetHeapSize(&addr, 0x280000); // 2.5MB heap
     if (R_SUCCEEDED(rc)) {
         fake_heap_start = (char*)addr;
         fake_heap_end   = fake_heap_start + 0x280000;
@@ -66,7 +69,8 @@ void __libnx_initheap(void)
 }
 
 // Custom service initialization for sysmodule
-// ONLY initialize services that are safe for sysmodule context
+// ONLY initialize services that are needed persistently.
+// pm:shell and time are init'd on-demand (like NSParentalControl does).
 void __appInit(void)
 {
     Result rc;
@@ -90,22 +94,15 @@ void __appInit(void)
         fatalThrow(MAKERESULT(Module_HomebrewLoader, 2));
 
     // Initialize pmdmnt for getting running app PID
+    // This is safe and needed persistently
     rc = pmdmntInitialize();
     if (R_FAILED(rc)) {
         // Non-fatal, we can still work without it
     }
 
-    // Initialize pm:shell for terminating programs
-    rc = pmshellInitialize();
-    if (R_FAILED(rc)) {
-        // Non-fatal
-    }
-
-    // Initialize time service for timestamps
-    rc = timeInitialize();
-    if (R_FAILED(rc)) {
-        // Non-fatal, but timer won't work well
-    }
+    // Do NOT initialize pm:shell here - init on demand like NSParentalControl
+    // Do NOT initialize time here - init on demand like NSParentalControl
+    // Do NOT call pctlInitialize() - it WILL crash in sysmodule context
 
     smExit();
 }
@@ -169,152 +166,20 @@ static bool readCmd(char *cmd, size_t cmdSize, u32 *param)
     return false;
 }
 
-// ---- Time helpers ----
+// ---- Time helper (on-demand init like NSParentalControl) ----
+
 static u64 getUnixSeconds(void)
 {
-    u64 timestamp = 0;
-    Result rc = timeGetCurrentTime(TimeType_UserSystemClock, &timestamp);
+    Result rc = timeInitialize();
     if (R_FAILED(rc)) return 0;
+
+    u64 timestamp = 0;
+    rc = timeGetCurrentTime(TimeType_UserSystemClock, &timestamp);
+    timeExit(); // Always exit after use (like NSParentalControl's today())
     return timestamp;
 }
 
-// ---- Parental control management ----
-// We use pctl service IPC, but we do it CAREFULLY:
-// 1. Only call pctlInitialize() ONCE at start, and if it fails, we continue anyway
-// 2. Use try/catch style with error checking
-// 3. NEVER let pctl failures crash the sysmodule
-
-static bool g_pctlAvailable = false;
-
-// Try to initialize pctl service (non-fatal)
-static void tryInitPctl(void)
-{
-    // Try pctl:a first (administrator), then fall back to regular pctl
-    Result rc = pctlInitialize();
-    if (R_SUCCEEDED(rc)) {
-        g_pctlAvailable = true;
-        writeStatus("IDLE:ready_pctl");
-        return;
-    }
-
-    // pctl failed - we'll work without it
-    // We can still terminate games and manage our own state
-    g_pctlAvailable = false;
-    writeStatus("IDLE:ready_no_pctl");
-}
-
-// UnlockRestrictionTemporarily (IPC Cmd 1201)
-static Result myPctlUnlockTemporarily(void)
-{
-    if (!g_pctlAvailable) return MAKERESULT(20, 1); // custom error
-
-    Service *srv = pctlGetServiceSession_Service();
-    char pin[8] = {0};
-    strncpy(pin, PIN_CODE, sizeof(pin) - 1);
-
-    serviceAssumeDomain(srv);
-    return serviceDispatch(srv, 1201,
-        .buffer_attrs = { SfBufferAttr_In | SfBufferAttr_HipcPointer },
-        .buffers = { { pin, strlen(pin) } }
-    );
-}
-
-// RevertRestrictionTemporaryUnlocked (IPC Cmd 1007)
-static Result myPctlRevertUnlock(void)
-{
-    if (!g_pctlAvailable) return MAKERESULT(20, 2);
-
-    Service *srv = pctlGetServiceSession_Service();
-    serviceAssumeDomain(srv);
-    return serviceDispatch(srv, 1007);
-}
-
-// SetSafetyLevel (IPC Cmd 1033)
-static Result myPctlSetSafetyLevel(u32 level)
-{
-    if (!g_pctlAvailable) return MAKERESULT(20, 3);
-
-    Service *srv = pctlGetServiceSession_Service();
-    serviceAssumeDomain(srv);
-    return serviceDispatchIn(srv, 1033, level);
-}
-
-// IsRestrictionEnabled (IPC Cmd 1031) - renamed to avoid libnx conflict
-static Result myPctlIsRestrictionEnabled(bool *out)
-{
-    if (!g_pctlAvailable) return MAKERESULT(20, 4);
-
-    *out = false;
-    Service *srv = pctlGetServiceSession_Service();
-    serviceAssumeDomain(srv);
-    return serviceDispatchOut(srv, 1031, *out);
-}
-
-// ---- Unlock / Lock parental controls ----
-
-static Result unlockParental(void)
-{
-    Result rc;
-
-    // Method 1: UnlockRestrictionTemporarily with PIN (cleanest)
-    rc = myPctlUnlockTemporarily();
-    if (R_SUCCEEDED(rc)) {
-        // Verify it worked using IPC Cmd 1006 (IsRestrictionTemporaryUnlocked)
-        if (g_pctlAvailable) {
-            bool unlocked = false;
-            Service *srv = pctlGetServiceSession_Service();
-            serviceAssumeDomain(srv);
-            serviceDispatchOut(srv, 1006, unlocked);
-            if (unlocked) return 0;
-        } else {
-            // No way to verify, assume success
-            return 0;
-        }
-    }
-
-    // Method 2: SetSafetyLevel(0) — permanent change
-    rc = myPctlSetSafetyLevel(0);
-    if (R_SUCCEEDED(rc)) {
-        if (g_pctlAvailable) {
-            bool enabled = true;
-            myPctlIsRestrictionEnabled(&enabled);
-            if (!enabled) return 0;
-        } else {
-            return 0;
-        }
-    }
-
-    // Method 3: If pctl is not available at all, just return success
-    // The companion will show that parental control may still be on
-    if (!g_pctlAvailable) {
-        return 0; // "best effort" - we tried
-    }
-
-    return rc;
-}
-
-static Result lockParental(void)
-{
-    Result rc;
-
-    // Method 1: Revert temporary unlock
-    rc = myPctlRevertUnlock();
-    if (R_SUCCEEDED(rc)) {
-        if (g_pctlAvailable) {
-            bool enabled = false;
-            myPctlIsRestrictionEnabled(&enabled);
-            if (enabled) return 0;
-        } else {
-            return 0;
-        }
-    }
-
-    // Method 2: SetSafetyLevel(10) — most restrictive
-    rc = myPctlSetSafetyLevel(10);
-    return rc;
-}
-
-// ---- Close foreground game via pm:shell (using libnx API) ----
+// ---- Close foreground game via pm:shell (on-demand, like NSParentalControl) ----
 
 static Result closeForegroundApp(void)
 {
@@ -331,24 +196,29 @@ static Result closeForegroundApp(void)
         return rc;
     }
 
-    // Use pm:shell to terminate by title ID (same as NSParentalControl)
+    // Initialize pm:shell on demand (exactly like NSParentalControl does)
+    rc = pmshellInitialize();
+    if (R_FAILED(rc)) {
+        return rc;
+    }
+
     rc = pmshellTerminateProgram(title_id);
+
+    // Exit pm:shell immediately after use (like NSParentalControl)
+    pmshellExit();
+
     return rc;
 }
 
 // ---- Main sysmodule loop ----
 int main(int argc, char **argv)
 {
-    Result rc;
-
     // Mount SD card (fs already initialized in __appInit)
     fsdevMountSdmc();
 
-    // Try to initialize pctl service (non-fatal if it fails)
-    tryInitPctl();
-
-    // Clean up any stale command file
+    // Clean up any stale command/status files
     remove(CMD_PATH);
+    writeStatus("IDLE:ready");
 
     // Main loop - runs forever as sysmodule
     while (true) {
@@ -360,31 +230,22 @@ int main(int argc, char **argv)
             if (strcmp(cmd, "UNLOCK") == 0 && g_state == STATE_IDLE) {
                 g_minutes = param;
 
-                // Unlock parental control via IPC
-                rc = unlockParental();
-                if (R_FAILED(rc) && g_pctlAvailable) {
-                    char err[64];
-                    snprintf(err, sizeof(err), "ERROR:unlock:0x%lx", (unsigned long)rc);
-                    writeStatus(err);
-                } else {
-                    // Start countdown
-                    g_deadline = getUnixSeconds() + (u64)g_minutes * 60ULL;
-                    g_state = STATE_COUNTDOWN;
+                // Start countdown - we don't need pctl since
+                // the game is already running and we just need to
+                // track time and kill it when time's up
+                g_deadline = getUnixSeconds() + (u64)g_minutes * 60ULL;
+                g_state = STATE_COUNTDOWN;
 
-                    char status[64];
-                    snprintf(status, sizeof(status), "COUNTDOWN:%lu:%llu",
-                             (unsigned long)g_minutes, (unsigned long long)g_deadline);
-                    writeStatus(status);
-                }
+                char status[64];
+                snprintf(status, sizeof(status), "COUNTDOWN:%lu:%llu",
+                         (unsigned long)g_minutes, (unsigned long long)g_deadline);
+                writeStatus(status);
 
             } else if (strcmp(cmd, "STOP") == 0 && g_state == STATE_COUNTDOWN) {
-                // Early stop — close game, then re-lock
+                // Early stop — close game
                 closeForegroundApp();
                 svcSleepThread(500 * S_1MS);
 
-                if (g_pctlAvailable) {
-                    lockParental();
-                }
                 g_state = STATE_IDLE;
                 writeStatus("IDLE:stopped_early");
 
@@ -393,11 +254,7 @@ int main(int argc, char **argv)
                 char status[128];
                 switch (g_state) {
                     case STATE_IDLE:
-                        if (g_pctlAvailable) {
-                            snprintf(status, sizeof(status), "IDLE:ready");
-                        } else {
-                            snprintf(status, sizeof(status), "IDLE:ready_no_pctl");
-                        }
+                        snprintf(status, sizeof(status), "IDLE:ready");
                         break;
                     case STATE_COUNTDOWN: {
                         u64 now = getUnixSeconds();
@@ -418,18 +275,15 @@ int main(int argc, char **argv)
         if (g_state == STATE_COUNTDOWN) {
             u64 now = getUnixSeconds();
             if (now >= g_deadline) {
-                // Time's up — close game, then re-lock
-                closeForegroundApp();
+                // Time's up — close game
+                Result rc = closeForegroundApp();
                 svcSleepThread(500 * S_1MS);
 
-                if (g_pctlAvailable) {
-                    rc = lockParental();
-                }
                 g_state = STATE_IDLE;
 
-                if (g_pctlAvailable && R_FAILED(rc)) {
+                if (R_FAILED(rc)) {
                     char err[64];
-                    snprintf(err, sizeof(err), "IDLE:lock_failed:0x%lx", (unsigned long)rc);
+                    snprintf(err, sizeof(err), "IDLE:terminate_failed:0x%lx", (unsigned long)rc);
                     writeStatus(err);
                 } else {
                     writeStatus("IDLE:timer_expired");
@@ -441,11 +295,7 @@ int main(int argc, char **argv)
         svcSleepThread(500 * S_1MS);
     }
 
-    // Cleanup (never reached in sysmodule, but good practice)
-    pctlExit();
-    pmshellExit();
-    pmdmntExit();
-    timeExit();
+    // Never reached in sysmodule
     fsdevUnmountAll();
     fsExit();
     return 0;
