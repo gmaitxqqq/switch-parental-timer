@@ -185,7 +185,6 @@ static u64 getUnixSeconds(void)
 // 3. NEVER let pctl failures crash the sysmodule
 
 static bool g_pctlAvailable = false;
-static Service g_pctlService = {0};
 
 // Try to initialize pctl service (non-fatal)
 static void tryInitPctl(void)
@@ -205,7 +204,7 @@ static void tryInitPctl(void)
 }
 
 // UnlockRestrictionTemporarily (IPC Cmd 1201)
-static Result pctlUnlockTemporarily(void)
+static Result myPctlUnlockTemporarily(void)
 {
     if (!g_pctlAvailable) return MAKERESULT(20, 1); // custom error
 
@@ -221,7 +220,7 @@ static Result pctlUnlockTemporarily(void)
 }
 
 // RevertRestrictionTemporaryUnlocked (IPC Cmd 1007)
-static Result pctlRevertUnlock(void)
+static Result myPctlRevertUnlock(void)
 {
     if (!g_pctlAvailable) return MAKERESULT(20, 2);
 
@@ -231,7 +230,7 @@ static Result pctlRevertUnlock(void)
 }
 
 // SetSafetyLevel (IPC Cmd 1033)
-static Result pctlSetSafetyLevel(u32 level)
+static Result myPctlSetSafetyLevel(u32 level)
 {
     if (!g_pctlAvailable) return MAKERESULT(20, 3);
 
@@ -240,8 +239,8 @@ static Result pctlSetSafetyLevel(u32 level)
     return serviceDispatchIn(srv, 1033, level);
 }
 
-// IsRestrictionEnabled (IPC Cmd 1031)
-static Result pctlIsRestrictionEnabled(bool *out)
+// IsRestrictionEnabled (IPC Cmd 1031) - renamed to avoid libnx conflict
+static Result myPctlIsRestrictionEnabled(bool *out)
 {
     if (!g_pctlAvailable) return MAKERESULT(20, 4);
 
@@ -258,12 +257,14 @@ static Result unlockParental(void)
     Result rc;
 
     // Method 1: UnlockRestrictionTemporarily with PIN (cleanest)
-    rc = pctlUnlockTemporarily();
+    rc = myPctlUnlockTemporarily();
     if (R_SUCCEEDED(rc)) {
-        // Verify it worked - but don't crash if we can't verify
+        // Verify it worked using IPC Cmd 1006 (IsRestrictionTemporaryUnlocked)
         if (g_pctlAvailable) {
             bool unlocked = false;
-            pctlIsRestrictionTemporaryUnlocked(&unlocked);
+            Service *srv = pctlGetServiceSession_Service();
+            serviceAssumeDomain(srv);
+            serviceDispatchOut(srv, 1006, unlocked);
             if (unlocked) return 0;
         } else {
             // No way to verify, assume success
@@ -272,11 +273,11 @@ static Result unlockParental(void)
     }
 
     // Method 2: SetSafetyLevel(0) — permanent change
-    rc = pctlSetSafetyLevel(0);
+    rc = myPctlSetSafetyLevel(0);
     if (R_SUCCEEDED(rc)) {
         if (g_pctlAvailable) {
             bool enabled = true;
-            pctlIsRestrictionEnabled(&enabled);
+            myPctlIsRestrictionEnabled(&enabled);
             if (!enabled) return 0;
         } else {
             return 0;
@@ -297,11 +298,11 @@ static Result lockParental(void)
     Result rc;
 
     // Method 1: Revert temporary unlock
-    rc = pctlRevertUnlock();
+    rc = myPctlRevertUnlock();
     if (R_SUCCEEDED(rc)) {
         if (g_pctlAvailable) {
             bool enabled = false;
-            pctlIsRestrictionEnabled(&enabled);
+            myPctlIsRestrictionEnabled(&enabled);
             if (enabled) return 0;
         } else {
             return 0;
@@ -309,7 +310,7 @@ static Result lockParental(void)
     }
 
     // Method 2: SetSafetyLevel(10) — most restrictive
-    rc = pctlSetSafetyLevel(10);
+    rc = myPctlSetSafetyLevel(10);
     return rc;
 }
 
