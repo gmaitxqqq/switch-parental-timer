@@ -1,4 +1,4 @@
-name: Build Switch ParentalTimer
+name: Build Switch ParentalTimer v8
 
 on:
   push:
@@ -35,35 +35,39 @@ jobs:
       - name: Build sysmodule
         run: |
           cd sysmodule
+          make clean 2>/dev/null || true
           make
 
       - name: Build companion NRO
         run: |
           cd companion
+          make clean 2>/dev/null || true
           make
 
       - name: List outputs
         run: |
           echo "=== Sysmodule outputs ==="
-          ls -lh sysmodule/*.nsp sysmodule/*.nso 2>/dev/null || echo "No sysmodule outputs"
+          ls -lh sysmodule/*.nsp sysmodule/*.nso 2>/dev/null || echo "No sysmodule outputs in root"
+          find sysmodule/ -name "*.nsp" -o -name "*.nso" | head -5
           echo "=== Companion outputs ==="
           ls -lh companion/*.nro 2>/dev/null || echo "No companion outputs"
 
       - name: Prepare deploy structure
         run: |
-          mkdir -p deploy/atmosphere/contents/4200000000000001
+          mkdir -p deploy/atmosphere/contents/4200000000000001/flags
           mkdir -p deploy/switch
 
           # Sysmodule: NSP goes to atmosphere/contents/
-          if [ -f sysmodule/sysmodule.nsp ]; then
-            cp sysmodule/sysmodule.nsp deploy/atmosphere/contents/4200000000000001/exefs.nsp
-            mkdir -p deploy/atmosphere/contents/4200000000000001/flags
+          NSP_FILE=$(find sysmodule/ -name "*.nsp" -type f | head -1)
+          if [ -n "$NSP_FILE" ]; then
+            cp "$NSP_FILE" deploy/atmosphere/contents/4200000000000001/exefs.nsp
             touch deploy/atmosphere/contents/4200000000000001/flags/boot2.flag
             echo '{"name":"ParentalTimer","tid":"4200000000000001","requires_reboot":false}' > deploy/atmosphere/contents/4200000000000001/toolbox.json
-            echo "Sysmodule NSP packaged"
+            echo "Sysmodule NSP packaged: $(ls -lh deploy/atmosphere/contents/4200000000000001/exefs.nsp)"
           else
-            echo "WARNING: sysmodule.nsp not found"
-            ls -la sysmodule/
+            echo "ERROR: No .nsp file found!"
+            find sysmodule/ -type f | head -20
+            exit 1
           fi
 
           # Companion NRO goes to /switch/
@@ -75,45 +79,9 @@ jobs:
             ls -la companion/
           fi
 
-          # Create a simple install instruction
-          cat > deploy/INSTALL.txt << 'EOF'
-          ParentalTimer Installation
-          ========================
-          
-          1. Copy the ENTIRE "atmosphere" folder to your SD card root
-             (merge with existing atmosphere folder)
-          
-          2. Copy "switch" folder contents to SD:/switch/
-          
-          3. Reboot your Switch into CFW
-          
-          4. Open Album to find "ParentalTimer" app
-          
-          5. Select duration and press A
-          
-          6. The sysmodule will auto-unlock parental control,
-             run the timer in background, and re-lock when done.
-          
-          PIN: 8473
-          EOF
-
-      - name: Upload Sysmodule NSP
-        uses: actions/upload-artifact@v4
-        with:
-          name: parental_timer_sysmodule
-          path: deploy/atmosphere/
-          retention-days: 30
-
-      - name: Upload Companion NRO
-        uses: actions/upload-artifact@v4
-        with:
-          name: parental_timer_companion
-          path: deploy/switch/
-          retention-days: 30
-
       - name: Upload Full Deploy Package
         uses: actions/upload-artifact@v4
         with:
-          name: parental_timer_full
+          name: parental_timer_full_v8
           path: deploy/
           retention-days: 30

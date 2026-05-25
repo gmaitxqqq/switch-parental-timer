@@ -1,4 +1,4 @@
-// ParentalTimer Sysmodule v7
+// ParentalTimer Sysmodule v8
 // =============================================================
 // Runs as Atmosphere sysmodule (background daemon).
 // Communicates with companion NRO via file on SD card.
@@ -34,6 +34,84 @@ static TimerState g_state = STATE_IDLE;
 static u32 g_minutes = 0;
 static u64 g_deadline = 0;
 static bool g_pctlReady = false;
+
+// ---- Sysmodule initialization (following NSParentalControl pattern) ----
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Minimize fs resource usage (same as NSParentalControl)
+u32 __nx_fsdev_direntry_cache_size = 1;
+bool __nx_fsdev_support_cwd = false;
+
+u32 __nx_applet_type = AppletType_None;
+ViLayerFlags __nx_vi_stray_layer_flags = (ViLayerFlags)0;
+
+// Custom heap initialization for sysmodule
+void __libnx_initheap(void)
+{
+    extern char* fake_heap_start;
+    extern char* fake_heap_end;
+
+    void* addr = NULL;
+    Result rc = svcSetHeapSize(&addr, 0x200000); // 2MB heap
+    if (R_SUCCEEDED(rc)) {
+        fake_heap_start = (char*)addr;
+        fake_heap_end   = fake_heap_start + 0x200000;
+    }
+}
+
+// Custom service initialization for sysmodule
+void __appInit(void)
+{
+    Result rc;
+
+    rc = smInitialize();
+    if (R_FAILED(rc))
+        fatalThrow(MAKERESULT(Module_HomebrewLoader, 1));
+
+    // Get firmware version
+    rc = setsysInitialize();
+    if (R_SUCCEEDED(rc)) {
+        SetSysFirmwareVersion fw;
+        rc = setsysGetFirmwareVersion(&fw);
+        if (R_SUCCEEDED(rc))
+            hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro));
+        setsysExit();
+    }
+
+    rc = fsInitialize();
+    if (R_FAILED(rc))
+        fatalThrow(MAKERESULT(Module_HomebrewLoader, 2));
+
+    rc = timeInitialize();
+    if (R_FAILED(rc))
+        fatalThrow(MAKERESULT(Module_HomebrewLoader, 3));
+
+    rc = pmdmntInitialize();
+    if (R_FAILED(rc)) {
+        // Non-fatal, we can still work without it
+    }
+
+    rc = pmshellInitialize();
+    if (R_FAILED(rc)) {
+        // Non-fatal
+    }
+
+    smExit();
+}
+
+void __wrap_exit(void)
+{
+    smExit();
+    svcExitProcess();
+    __builtin_unreachable();
+}
+
+#ifdef __cplusplus
+}
+#endif
 
 // ---- File-based IPC ----
 
@@ -120,14 +198,6 @@ static Result myPctlRevertRestrictionTemporarily(void)
     return serviceDispatch(srv, 1007);
 }
 
-// IsRestrictionEnabled (IPC Cmd 1031) — use libnx wrapper
-// pctlIsRestrictionEnabled is already in libnx, but we need our
-// own that works with the global session. Actually libnx already
-// wraps it, so we can just call pctlIsRestrictionEnabled() directly.
-
-// IsRestrictionTemporaryUnlocked (IPC Cmd 1006) — libnx wraps this too.
-// We can call pctlIsRestrictionTemporaryUnlocked() directly.
-
 // SetSafetyLevel (IPC Cmd 1033) — NOT in libnx, raw IPC
 static Result myPctlSetSafetyLevel(u32 level)
 {
@@ -188,68 +258,35 @@ static Result lockParental(void)
     return rc;
 }
 
-// ---- Close foreground game via pm:shell ----
+// ---- Close foreground game via pm:shell (using libnx API) ----
 
 static Result closeForegroundApp(void)
 {
-    Result rc;
-    Service pmsrv;
-
-    // Connect to pm:shell
-    rc = smGetService(&pmsrv, "pm:shell");
-    if (R_FAILED(rc)) return rc;
-
-    // Convert to domain for IPC calls
-    serviceConvertToDomain(&pmsrv);
-
-    // Cmd 5: GetApplicationProcessId → u64 pid
-    u64 app_pid = 0;
-    serviceAssumeDomain(&pmsrv);
-    rc = serviceDispatchOut(&pmsrv, 5, app_pid);
-    serviceClose(&pmsrv);
-
-    if (R_FAILED(rc) || app_pid == 0) {
+    u64 pid = 0;
+    Result rc = pmdmntGetApplicationProcessId(&pid);
+    if (R_FAILED(rc) || pid == 0) {
         // No app running, that's fine
         return 0;
     }
 
-    // Close game via pm:dmnt Cmd 3: TerminateProcessByPid
-    Service pmdmnt;
-    rc = smGetService(&pmdmnt, "pm:dmnt");
-    if (R_FAILED(rc)) return rc;
+    u64 title_id = 0;
+    rc = pmdmntGetProgramId(&title_id, pid);
+    if (R_FAILED(rc) || title_id == 0) {
+        return rc;
+    }
 
-    serviceConvertToDomain(&pmdmnt);
-    serviceAssumeDomain(&pmdmnt);
-    rc = serviceDispatchIn(&pmdmnt, 3, app_pid);
-    serviceClose(&pmdmnt);
-
+    // Use pm:shell to terminate by title ID (same as NSParentalControl)
+    rc = pmshellTerminateProgram(title_id);
     return rc;
 }
 
 // ---- Main sysmodule loop ----
 int main(int argc, char **argv)
 {
-    // Initialize services
     Result rc;
 
-    // Initialize time service first (lightweight)
-    rc = timeInitialize();
-    if (R_FAILED(rc)) {
-        // Can't even get time, but try to continue
-    }
-
-    // Initialize filesystem service
-    rc = fsInitialize();
-    if (R_FAILED(rc)) {
-        // Can't access SD card, nothing we can do
-        // But we can't write status either... just continue
-    }
-
-    rc = fsdevMountSdmc();
-    if (R_FAILED(rc)) {
-        // SD card mount failed
-        writeStatus("ERROR:sd_mount_failed");
-    }
+    // Mount SD card (fs already initialized in __appInit)
+    fsdevMountSdmc();
 
     // Initialize pctl service
     // libnx's pctlInitialize tries pctl:a → pctl:s → pctl:r → pctl
@@ -371,8 +408,10 @@ int main(int argc, char **argv)
 
     // Cleanup (never reached in sysmodule, but good practice)
     pctlExit();
+    pmshellExit();
+    pmdmntExit();
+    timeExit();
     fsdevUnmountAll();
     fsExit();
-    timeExit();
     return 0;
 }
