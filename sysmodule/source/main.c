@@ -182,7 +182,7 @@ static Result pctlRevertRestrictionTemporarily(void)
 
 // IsRestrictionEnabled (IPC Cmd 1031)
 // Output: bool
-static Result pctlIsRestrictionEnabled(bool *enabled)
+static Result myPctlIsRestrictionEnabled(bool *enabled)
 {
     if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
@@ -194,7 +194,7 @@ static Result pctlIsRestrictionEnabled(bool *enabled)
 
 // IsRestrictionTemporaryUnlocked (IPC Cmd 1006)
 // Output: bool
-static Result pctlIsRestrictionTemporaryUnlocked(bool *unlocked)
+static Result myPctlIsRestrictionTemporaryUnlocked(bool *unlocked)
 {
     if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
@@ -234,7 +234,7 @@ static Result unlockParental(void)
     if (R_SUCCEEDED(rc)) {
         // Verify it worked
         bool unlocked = false;
-        pctlIsRestrictionTemporaryUnlocked(&unlocked);
+        myPctlIsRestrictionTemporaryUnlocked(&unlocked);
         if (unlocked) return 0;
     }
 
@@ -258,7 +258,7 @@ static Result lockParental(void)
     if (R_SUCCEEDED(rc)) {
         // Verify restriction is back
         bool enabled = false;
-        pctlIsRestrictionEnabled(&enabled);
+        myPctlIsRestrictionEnabled(&enabled);
         if (enabled) return 0;
     }
 
