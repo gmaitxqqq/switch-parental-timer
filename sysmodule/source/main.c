@@ -1,7 +1,11 @@
-// ParentalTimer Sysmodule v4
+// ParentalTimer Sysmodule v5
 // =============================================================
 // Runs as Atmosphere sysmodule (background daemon).
-// Communicates with companion NRO via shared memory file.
+// Communicates with companion NRO via file on SD card.
+//
+// Uses pctl IPC service to directly unlock/lock parental controls
+// — no virtual pad, no UI navigation, no button simulation.
+// Kid can keep playing while we toggle restrictions instantly.
 //
 // PIN: 8473 (hardcoded) | Default: 15 min
 // Title ID: 0x4200000000000001
@@ -9,9 +13,9 @@
 //          sd:/atmosphere/contents/4200000000000001/boot2.flag
 //
 // Communication via sd:/parental_timer.cmd:
-//   Line 1: "UNLOCK <minutes>"  -> unlock parental, start timer
-//   Line 2: "STATUS"            -> sysmodule writes back status
-//   Line 3: "STOP"              -> stop timer and re-lock
+//   "UNLOCK <minutes>"  -> unlock parental, start timer
+//   "STATUS"            -> sysmodule writes back status
+//   "STOP"              -> stop timer and re-lock
 // =============================================================
 
 #include <switch.h>
@@ -20,7 +24,6 @@
 #include <stdlib.h>
 
 #define PIN_CODE    "8473"
-#define PIN_LEN     4
 #define S_1MS       (1000000ULL)
 #define S_1S        (1000000000ULL)
 #define CMD_PATH    "sdmc:/parental_timer.cmd"
@@ -29,18 +32,16 @@
 // Timer state
 typedef enum {
     STATE_IDLE,       // Waiting for command
-    STATE_UNLOCKING,  // Auto-navigating to unlock
     STATE_COUNTDOWN,  // Timer running, parental off
-    STATE_LOCKING     // Time up, re-locking
 } TimerState;
 
 static TimerState g_state = STATE_IDLE;
 static u32 g_minutes = 0;
 static u64 g_deadline = 0;
 
-// Virtual pad
-static bool g_vpadReady = false;
-static HiddbgAbstractedPadState g_vpadState;
+// pctl:a service session (admin privilege)
+static Service g_pctlSrv;
+static bool g_pctlReady = false;
 
 // ---- File-based IPC ----
 
@@ -99,145 +100,206 @@ static u64 getUnixSeconds(void)
     return timestamp;
 }
 
-// ---- Virtual pad (AbstractedPad AutoPilot, FW 5.0+) ----
-static Result vpadInit(void)
+// ---- pctl service helpers ----
+// These use raw IPC calls since libnx doesn't wrap the setter commands.
+
+// Initialize pctl:a (admin) service and get IParentalControlService
+static Result pctlAdminInit(void)
 {
-    Result rc = hiddbgInitialize();
-    if (R_FAILED(rc)) return rc;
+    Result rc;
 
-    memset(&g_vpadState, 0, sizeof(g_vpadState));
-    g_vpadState.type = 0x2; // Pro Controller
-    g_vpadState.state.buttons = 0;
-    g_vpadState.state.analog_stick_l.x = 0x0800;
-    g_vpadState.state.analog_stick_l.y = 0x0800;
-    g_vpadState.state.analog_stick_r.x = 0x0800;
-    g_vpadState.state.analog_stick_r.y = 0x0800;
-
-    rc = hiddbgSetAutoPilotVirtualPadState(0, &g_vpadState);
+    // Connect to pctl:a (admin session, allows write operations)
+    rc = smGetService(&g_pctlSrv, "pctl:a");
     if (R_FAILED(rc)) {
-        hiddbgExit();
+        // Fallback: try pctl (general session)
+        rc = smGetService(&g_pctlSrv, "pctl");
+        if (R_FAILED(rc)) return rc;
+    }
+
+    // Call CreateService (Cmd 0) to get IParentalControlService
+    // Input: u64 process_id (auto-filled by kernel)
+    // Output: moved handle (IParentalControlService object)
+    Service pctl_child;
+    rc = serviceDispatch(&g_pctlSrv, 0,
+        .out_num_objects = 1,
+        .out_objects = &pctl_child
+    );
+
+    if (R_FAILED(rc)) {
+        serviceClose(&g_pctlSrv);
         return rc;
     }
 
-    g_vpadReady = true;
+    // Replace g_pctlSrv with the child service (the actual IParentalControlService)
+    serviceClose(&g_pctlSrv);
+    g_pctlSrv = pctl_child;
+
+    // Initialize the service (some FW versions require this)
+    // Cmd 1 = Initialize (for older FW), Cmd 4000 = IsFreeCommunicationAvailable
+    // We just try to use it and handle errors
+
+    g_pctlReady = true;
     return 0;
 }
 
-static void vpadCleanup(void)
+static void pctlAdminExit(void)
 {
-    if (g_vpadReady) {
-        hiddbgUnsetAutoPilotVirtualPadState(0);
-        hiddbgUnsetAllAutoPilotVirtualPadState();
+    if (g_pctlReady) {
+        serviceClose(&g_pctlSrv);
+        g_pctlReady = false;
     }
-    hiddbgExit();
-    g_vpadReady = false;
 }
 
-static void pressBtn(u32 buttons, u32 holdMs, u32 gapMs)
+// UnlockRestrictionTemporarily (IPC Cmd 1201)
+// Input: PIN code as buffer
+// This temporarily unlocks all parental control restrictions for the current session.
+static Result pctlUnlockRestrictionTemporarily(void)
 {
-    if (!g_vpadReady) return;
+    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    g_vpadState.state.buttons = buttons;
-    hiddbgSetAutoPilotVirtualPadState(0, &g_vpadState);
-    svcSleepThread((u64)holdMs * S_1MS);
+    char pin[8] = {0};
+    strncpy(pin, PIN_CODE, sizeof(pin) - 1);
 
-    g_vpadState.state.buttons = 0;
-    hiddbgSetAutoPilotVirtualPadState(0, &g_vpadState);
-    svcSleepThread((u64)gapMs * S_1MS);
+    // Cmd 1201: UnlockRestrictionTemporarily
+    // Takes a buffer containing the PIN code string
+    Result rc = serviceDispatch(&g_pctlSrv, 1201,
+        .buffer_attrs = { SfBufferAttr_In | SfBufferAttr_HipcPointer },
+        .buffers = { { pin, strlen(pin) } }
+    );
+
+    return rc;
 }
 
-// ---- Auto-navigate to Parental Controls and disable ----
-static void autoDisableParental(void)
+// RevertRestrictionTemporaryUnlocked (IPC Cmd 1007)
+// Re-locks parental controls that were temporarily unlocked.
+static Result pctlRevertRestrictionTemporarily(void)
 {
-    writeStatus("UNLOCKING:navigating");
+    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    // Go to Home Menu
-    pressBtn(HiddbgNpadButton_Home, 300, 1500);
-
-    // Navigate to System Settings
-    for (int i = 0; i < 5; i++)
-        pressBtn(HidNpadButton_Down, 100, 200);
-    for (int i = 0; i < 6; i++)
-        pressBtn(HidNpadButton_Left, 100, 200);
-
-    // Open System Settings
-    pressBtn(HidNpadButton_A, 200, 1500);
-
-    // Scroll to Parental Controls
-    for (int i = 0; i < 15; i++)
-        pressBtn(HidNpadButton_Down, 80, 150);
-
-    // Open Parental Controls
-    pressBtn(HidNpadButton_A, 200, 800);
-
-    // Select "Parental Controls Settings"
-    pressBtn(HidNpadButton_A, 200, 600);
-
-    // Enter PIN: 8473
-    for (int i = 0; i < PIN_LEN; i++) {
-        int digit = PIN_CODE[i] - '0';
-        for (int j = 0; j < digit; j++)
-            pressBtn(HidNpadButton_Right, 80, 80);
-        pressBtn(HidNpadButton_A, 150, 200);
-    }
-    // Confirm PIN entry
-    pressBtn(HidNpadButton_A, 150, 800);
-
-    // Toggle restriction OFF
-    pressBtn(HidNpadButton_A, 200, 500);
-    // Confirm
-    pressBtn(HidNpadButton_A, 200, 500);
-
-    // Return to home
-    pressBtn(HiddbgNpadButton_Home, 300, 800);
+    // Cmd 1007: RevertRestrictionTemporaryUnlocked — no input
+    return serviceDispatch(&g_pctlSrv, 1007);
 }
 
-// ---- Auto re-enable Parental Controls ----
-static void autoEnableParental(void)
+// IsRestrictionEnabled (IPC Cmd 1031)
+// Output: bool
+static Result pctlIsRestrictionEnabled(bool *enabled)
 {
-    writeStatus("LOCKING:closing_game");
+    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    // HOME to see running game
-    pressBtn(HiddbgNpadButton_Home, 300, 1000);
+    u8 tmp = 0;
+    Result rc = serviceDispatchOut(&g_pctlSrv, 1031, tmp);
+    *enabled = (tmp != 0);
+    return rc;
+}
 
-    // Close game with X
-    pressBtn(HidNpadButton_X, 200, 500);
-    pressBtn(HidNpadButton_A, 200, 1000);
-    svcSleepThread(1 * S_1S);
+// IsRestrictionTemporaryUnlocked (IPC Cmd 1006)
+// Output: bool
+static Result pctlIsRestrictionTemporaryUnlocked(bool *unlocked)
+{
+    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    writeStatus("LOCKING:navigating");
+    u8 tmp = 0;
+    Result rc = serviceDispatchOut(&g_pctlSrv, 1006, tmp);
+    *unlocked = (tmp != 0);
+    return rc;
+}
 
-    // Navigate to System Settings
-    for (int i = 0; i < 5; i++)
-        pressBtn(HidNpadButton_Down, 100, 200);
-    for (int i = 0; i < 6; i++)
-        pressBtn(HidNpadButton_Left, 100, 200);
-    pressBtn(HidNpadButton_A, 200, 1500);
+// SetSafetyLevel (IPC Cmd 1033) — requires pctl:a
+// SafetyLevel 0 = no restrictions
+static Result pctlSetSafetyLevel(u32 level)
+{
+    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    // Scroll to Parental Controls
-    for (int i = 0; i < 15; i++)
-        pressBtn(HidNpadButton_Down, 80, 150);
-    pressBtn(HidNpadButton_A, 200, 800);
+    return serviceDispatchIn(&g_pctlSrv, 1033, level);
+}
 
-    // Enter settings
-    pressBtn(HidNpadButton_A, 200, 600);
+// DeleteSettings (IPC Cmd 1043) — requires pctl:a
+// Deletes ALL parental control settings (nuclear option)
+static Result pctlDeleteSettings(void)
+{
+    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
 
-    // Enter PIN
-    for (int i = 0; i < PIN_LEN; i++) {
-        int digit = PIN_CODE[i] - '0';
-        for (int j = 0; j < digit; j++)
-            pressBtn(HidNpadButton_Right, 80, 80);
-        pressBtn(HidNpadButton_A, 150, 200);
+    return serviceDispatch(&g_pctlSrv, 1043);
+}
+
+// ---- Unlock / Lock parental controls ----
+
+static Result unlockParental(void)
+{
+    Result rc;
+
+    // Method 1: Try UnlockRestrictionTemporarily with PIN
+    // This is the cleanest way — temporary, doesn't modify settings permanently
+    rc = pctlUnlockRestrictionTemporarily();
+    if (R_SUCCEEDED(rc)) {
+        // Verify it worked
+        bool unlocked = false;
+        pctlIsRestrictionTemporaryUnlocked(&unlocked);
+        if (unlocked) return 0;
     }
-    pressBtn(HidNpadButton_A, 150, 800);
 
-    // Toggle restriction ON
-    pressBtn(HidNpadButton_A, 200, 500);
-    // Confirm
-    pressBtn(HidNpadButton_A, 200, 500);
+    // Method 2: Try SetSafetyLevel(0) via pctl:a
+    // This permanently changes the safety level to "no restriction"
+    rc = pctlSetSafetyLevel(0);
+    if (R_SUCCEEDED(rc)) return 0;
 
-    // Home
-    pressBtn(HiddbgNpadButton_Home, 300, 800);
+    // Method 3: Nuclear — DeleteSettings
+    // Wipes ALL parental control config
+    rc = pctlDeleteSettings();
+    return rc;
+}
+
+static Result lockParental(void)
+{
+    Result rc;
+
+    // Method 1: Revert temporary unlock
+    rc = pctlRevertRestrictionTemporarily();
+    if (R_SUCCEEDED(rc)) {
+        // Verify restriction is back
+        bool enabled = false;
+        pctlIsRestrictionEnabled(&enabled);
+        if (enabled) return 0;
+    }
+
+    // Method 2: Set safety level back to something restrictive
+    // Safety level 10 = most restrictive (standard for kids)
+    rc = pctlSetSafetyLevel(10);
+    return rc;
+}
+
+// ---- Close foreground game via pm:shell ----
+
+static Result closeForegroundApp(void)
+{
+    Result rc;
+    Service pmsrv;
+
+    // Connect to pm:shell
+    rc = smGetService(&pmsrv, "pm:shell");
+    if (R_FAILED(rc)) return rc;
+
+    // pm:shell Cmd 5: GetApplicationProcessId
+    // Returns the PID of the currently running application
+    u64 app_pid = 0;
+    rc = serviceDispatchOut(&pmsrv, 5, app_pid);
+    serviceClose(&pmsrv);
+
+    if (R_FAILED(rc) || app_pid == 0) {
+        // No app running, that's fine
+        return 0;
+    }
+
+    // Connect to pm:dmnt (debug monitor) to terminate the process
+    Service pmdmnt;
+    rc = smGetService(&pmdmnt, "pm:dmnt");
+    if (R_FAILED(rc)) return rc;
+
+    // pm:dmnt Cmd 3: TerminateProcessByPid
+    rc = serviceDispatchIn(&pmdmnt, 3, app_pid);
+    serviceClose(&pmdmnt);
+
+    return rc;
 }
 
 // ---- Main sysmodule loop ----
@@ -248,15 +310,18 @@ int main(int argc, char **argv)
     fsInitialize();
     fsdevMountSdmc();
 
-    // Try to initialize virtual pad
-    Result rc = vpadInit();
+    // Initialize pctl:a admin service
+    Result rc = pctlAdminInit();
     if (R_FAILED(rc)) {
-        writeStatus("ERROR:vpad_init_failed");
+        char err[64];
+        snprintf(err, sizeof(err), "ERROR:pctl_init_failed:0x%lx", (unsigned long)rc);
+        writeStatus(err);
+    } else {
+        writeStatus("IDLE:ready");
     }
 
-    // Clean up any stale command/status files
+    // Clean up any stale command file
     remove(CMD_PATH);
-    writeStatus("IDLE:ready");
 
     // Main loop - runs forever as sysmodule
     while (true) {
@@ -267,30 +332,45 @@ int main(int argc, char **argv)
         if (readCmd(cmd, sizeof(cmd), &param)) {
             if (strcmp(cmd, "UNLOCK") == 0 && g_state == STATE_IDLE) {
                 g_minutes = param;
-                g_state = STATE_UNLOCKING;
 
-                // Auto-unlock parental control
-                if (g_vpadReady) {
-                    autoDisableParental();
+                // Unlock parental control via IPC
+                if (g_pctlReady) {
+                    rc = unlockParental();
+                    if (R_FAILED(rc)) {
+                        char err[64];
+                        snprintf(err, sizeof(err), "ERROR:unlock_failed:0x%lx", (unsigned long)rc);
+                        writeStatus(err);
+                        // Don't start timer if unlock failed
+                        g_state = STATE_IDLE;
+                    } else {
+                        // Start countdown
+                        g_deadline = getUnixSeconds() + (u64)g_minutes * 60ULL;
+                        g_state = STATE_COUNTDOWN;
+
+                        char status[64];
+                        snprintf(status, sizeof(status), "COUNTDOWN:%lu:%llu",
+                                 (unsigned long)g_minutes, (unsigned long long)g_deadline);
+                        writeStatus(status);
+                    }
+                } else {
+                    writeStatus("ERROR:pctl_not_ready");
                 }
-
-                // Start countdown
-                g_deadline = getUnixSeconds() + (u64)g_minutes * 60ULL;
-                g_state = STATE_COUNTDOWN;
-
-                char status[64];
-                snprintf(status, sizeof(status), "COUNTDOWN:%lu:%llu",
-                         (unsigned long)g_minutes, (unsigned long long)g_deadline);
-                writeStatus(status);
 
             } else if (strcmp(cmd, "STOP") == 0 && g_state == STATE_COUNTDOWN) {
-                // Early stop - re-lock immediately
-                g_state = STATE_LOCKING;
-                if (g_vpadReady) {
-                    autoEnableParental();
-                }
+                // Early stop — close game, then re-lock
+                closeForegroundApp();
+                svcSleepThread(500 * S_1MS); // Brief delay for process to terminate
+
+                rc = lockParental();
                 g_state = STATE_IDLE;
-                writeStatus("IDLE:stopped_early");
+
+                if (R_FAILED(rc)) {
+                    char err[64];
+                    snprintf(err, sizeof(err), "IDLE:lock_failed:0x%lx", (unsigned long)rc);
+                    writeStatus(err);
+                } else {
+                    writeStatus("IDLE:stopped_early");
+                }
 
             } else if (strcmp(cmd, "STATUS") == 0) {
                 // Report current status
@@ -298,9 +378,6 @@ int main(int argc, char **argv)
                 switch (g_state) {
                     case STATE_IDLE:
                         snprintf(status, sizeof(status), "IDLE:ready");
-                        break;
-                    case STATE_UNLOCKING:
-                        snprintf(status, sizeof(status), "UNLOCKING:in_progress");
                         break;
                     case STATE_COUNTDOWN: {
                         u64 now = getUnixSeconds();
@@ -312,9 +389,6 @@ int main(int argc, char **argv)
                         }
                         break;
                     }
-                    case STATE_LOCKING:
-                        snprintf(status, sizeof(status), "LOCKING:in_progress");
-                        break;
                 }
                 writeStatus(status);
             }
@@ -324,12 +398,20 @@ int main(int argc, char **argv)
         if (g_state == STATE_COUNTDOWN) {
             u64 now = getUnixSeconds();
             if (now >= g_deadline) {
-                g_state = STATE_LOCKING;
-                if (g_vpadReady) {
-                    autoEnableParental();
-                }
+                // Time's up — close game, then re-lock
+                closeForegroundApp();
+                svcSleepThread(500 * S_1MS);
+
+                rc = lockParental();
                 g_state = STATE_IDLE;
-                writeStatus("IDLE:timer_expired");
+
+                if (R_FAILED(rc)) {
+                    char err[64];
+                    snprintf(err, sizeof(err), "IDLE:lock_failed:0x%lx", (unsigned long)rc);
+                    writeStatus(err);
+                } else {
+                    writeStatus("IDLE:timer_expired");
+                }
             }
         }
 
@@ -338,7 +420,7 @@ int main(int argc, char **argv)
     }
 
     // Cleanup (never reached in sysmodule, but good practice)
-    vpadCleanup();
+    pctlAdminExit();
     fsdevUnmountAll();
     fsExit();
     timeExit();
