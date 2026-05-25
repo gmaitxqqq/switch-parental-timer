@@ -35,12 +35,14 @@ jobs:
       - name: Build sysmodule
         run: |
           cd sysmodule
-          make -j$(nproc)
+          mkdir -p build
+          make
 
       - name: Build companion NRO
         run: |
           cd companion
-          make -j$(nproc)
+          mkdir -p build
+          make
 
       - name: List outputs
         run: |
