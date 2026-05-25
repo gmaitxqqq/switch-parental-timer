@@ -1,13 +1,50 @@
 {
     "name": "ParentalTimer",
-    "title_id": "0x4200000000000001",
-    "main_thread_stack_size": 0x1000,
+    "main_thread_stack_size": "0x1000",
     "main_thread_priority": 44,
     "default_cpu_id": 3,
+    "version": "0x0",
+    "is_64_bit": true,
     "process_category": 1,
+    "address_space_type": 3,
+    "filesystem_access": {
+        "permissions": "0xFFFFFFFFFFFFFFFF"
+    },
+    "service_access": [
+        "time:a",
+        "time:s",
+        "time:u",
+        "fsp-srv",
+        "hiddbg"
+    ],
     "kernel_capabilities": [
-        { "type": "interrupts", "value": {} },
-        { "type": "syscalls", "value": { "svcSetHeapSize": 1, "svcSetMemoryPermission": 2, "svcSetMemoryAttribute": 3, "svcMapMemory": 4, "svcUnmapMemory": 5, "svcQueryMemory": 6, "svcExitProcess": 7, "svcCreateThread": 8, "svcStartThread": 9, "svcExitThread": 10, "svcSleepThread": 11, "svcGetThreadPriority": 12, "svcSetThreadPriority": 13, "svcGetCurrentProcessorNumber": 14, "svcSignalEvent": 15, "svcClearEvent": 16, "svcMapSharedMemory": 17, "svcUnmapSharedMemory": 18, "svcCreateTransferMemory": 19, "svcCloseHandle": 20, "svcResetSignal": 21, "svcWaitSynchronization": 22, "svcCancelSynchronization": 23, "svcArbitrateLock": 24, "svcArbitrateUnlock": 25, "svcWaitProcessWideKeyAtomic": 26, "svcSignalProcessWideKey": 27, "svcGetSystemTick": 28, "svcConnectToNamedPort": 29, "svcSendSyncRequestUser": 30, "svcSendSyncRequest": 31, "svcSendAsyncRequestWithUserBuffer": 32, "svcGetProcessId": 33, "svcGetThreadId": 34, "svcBreak": 35, "svcOutputDebugString": 36, "svcReturnFromException": 37, "svcGetInfo": 38, "svcCreateSession": 39, "svcAcceptSession": 40, "svcReplyAndReceive": 41, "svcReplyAndReceiveWithUserBuffer": 42, "svcCreateEvent": 43, "svcMapPhysicalMemory": 44, "svcUnmapPhysicalMemory": 45, "svcSetProcessMemoryPermission": 46, "svcCreateSharedMemory": 47, "svcMapTransferMemory": 48, "svcUnmapTransferMemory": 49, "svcCreateInterruptEvent": 50, "svcQueryPhysicalMemory": 51, "svcQueryIoMapping": 52, "svcCreateDeviceAddressSpace": 53, "svcAttachDeviceAddressSpace": 54, "svcDetachDeviceAddressSpace": 55, "svcMapDeviceAddressSpaceAligned": 56, "svcUnmapDeviceAddressSpace": 57, "svcFlushProcessDataCache": 58, "svcReadWriteRegister": 59, "svcSetProcessActivity": 60, "svcCreateSharedMemoryPhysical": 61, "svcMapSharedMemory": 62, "svcGetDebugEvent": 63, "svcContinueDebugEvent": 64, "svcSetHardwareBreakPoint": 65 } },
-        { "type": "handle_table_size", "value": 512 }
+        {
+            "type": "kernel_flags",
+            "value": {
+                "highest_thread_priority": 63,
+                "lowest_thread_priority": 0,
+                "highest_cpu_id": 3,
+                "lowest_cpu_id": 0
+            }
+        },
+        {
+            "type": "application_type",
+            "value": 1
+        },
+        {
+            "type": "min_kernel_version",
+            "value": "0x0020"
+        },
+        {
+            "type": "handle_table_size",
+            "value": 512
+        },
+        {
+            "type": "debug_flags",
+            "value": {
+                "allow_debug": false,
+                "force_debug": false
+            }
+        }
     ]
 }
