@@ -1,21 +1,16 @@
-// ParentalTimer Sysmodule v5
+// ParentalTimer Sysmodule v6
 // =============================================================
 // Runs as Atmosphere sysmodule (background daemon).
 // Communicates with companion NRO via file on SD card.
 //
 // Uses pctl IPC service to directly unlock/lock parental controls
-// — no virtual pad, no UI navigation, no button simulation.
-// Kid can keep playing while we toggle restrictions instantly.
+// — instant, no UI navigation, no button simulation.
+// Kid can keep playing while we toggle restrictions.
 //
 // PIN: 8473 (hardcoded) | Default: 15 min
 // Title ID: 0x4200000000000001
 // Install: sd:/atmosphere/contents/4200000000000001/exefs.nsp
 //          sd:/atmosphere/contents/4200000000000001/boot2.flag
-//
-// Communication via sd:/parental_timer.cmd:
-//   "UNLOCK <minutes>"  -> unlock parental, start timer
-//   "STATUS"            -> sysmodule writes back status
-//   "STOP"              -> stop timer and re-lock
 // =============================================================
 
 #include <switch.h>
@@ -38,9 +33,6 @@ typedef enum {
 static TimerState g_state = STATE_IDLE;
 static u32 g_minutes = 0;
 static u64 g_deadline = 0;
-
-// pctl:a service session (admin privilege)
-static Service g_pctlSrv;
 static bool g_pctlReady = false;
 
 // ---- File-based IPC ----
@@ -100,126 +92,56 @@ static u64 getUnixSeconds(void)
     return timestamp;
 }
 
-// ---- pctl service helpers ----
-// These use raw IPC calls since libnx doesn't wrap the setter commands.
-
-// Initialize pctl:a (admin) service and get IParentalControlService
-static Result pctlAdminInit(void)
-{
-    Result rc;
-
-    // Connect to pctl:a (admin session, allows write operations)
-    rc = smGetService(&g_pctlSrv, "pctl:a");
-    if (R_FAILED(rc)) {
-        // Fallback: try pctl (general session)
-        rc = smGetService(&g_pctlSrv, "pctl");
-        if (R_FAILED(rc)) return rc;
-    }
-
-    // Call CreateService (Cmd 0) to get IParentalControlService
-    // Input: u64 process_id (auto-filled by kernel)
-    // Output: moved handle (IParentalControlService object)
-    Service pctl_child;
-    rc = serviceDispatch(&g_pctlSrv, 0,
-        .out_num_objects = 1,
-        .out_objects = &pctl_child
-    );
-
-    if (R_FAILED(rc)) {
-        serviceClose(&g_pctlSrv);
-        return rc;
-    }
-
-    // Replace g_pctlSrv with the child service (the actual IParentalControlService)
-    serviceClose(&g_pctlSrv);
-    g_pctlSrv = pctl_child;
-
-    // Initialize the service (some FW versions require this)
-    // Cmd 1 = Initialize (for older FW), Cmd 4000 = IsFreeCommunicationAvailable
-    // We just try to use it and handle errors
-
-    g_pctlReady = true;
-    return 0;
-}
-
-static void pctlAdminExit(void)
-{
-    if (g_pctlReady) {
-        serviceClose(&g_pctlSrv);
-        g_pctlReady = false;
-    }
-}
+// ---- pctl raw IPC helpers ----
+// libnx's pctlInitialize() already connects to pctl:a (with fallback)
+// and creates IParentalControlService session. We use
+// pctlGetServiceSession_Service() to get the Service* for raw IPC calls.
 
 // UnlockRestrictionTemporarily (IPC Cmd 1201)
-// Input: PIN code as buffer
-// This temporarily unlocks all parental control restrictions for the current session.
-static Result pctlUnlockRestrictionTemporarily(void)
+// Input: PIN code as Type-5 buffer (HipcPointer)
+static Result myPctlUnlockRestrictionTemporarily(void)
 {
-    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-
+    Service *srv = pctlGetServiceSession_Service();
     char pin[8] = {0};
     strncpy(pin, PIN_CODE, sizeof(pin) - 1);
 
-    // Cmd 1201: UnlockRestrictionTemporarily
-    // Takes a buffer containing the PIN code string
-    Result rc = serviceDispatch(&g_pctlSrv, 1201,
+    serviceAssumeDomain(srv);
+    return serviceDispatch(srv, 1201,
         .buffer_attrs = { SfBufferAttr_In | SfBufferAttr_HipcPointer },
         .buffers = { { pin, strlen(pin) } }
     );
-
-    return rc;
 }
 
 // RevertRestrictionTemporaryUnlocked (IPC Cmd 1007)
-// Re-locks parental controls that were temporarily unlocked.
-static Result pctlRevertRestrictionTemporarily(void)
+static Result myPctlRevertRestrictionTemporarily(void)
 {
-    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-
-    // Cmd 1007: RevertRestrictionTemporaryUnlocked — no input
-    return serviceDispatch(&g_pctlSrv, 1007);
+    Service *srv = pctlGetServiceSession_Service();
+    serviceAssumeDomain(srv);
+    return serviceDispatch(srv, 1007);
 }
 
-// IsRestrictionEnabled (IPC Cmd 1031)
-// Output: bool
-static Result myPctlIsRestrictionEnabled(bool *enabled)
-{
-    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+// IsRestrictionEnabled (IPC Cmd 1031) — use libnx wrapper
+// pctlIsRestrictionEnabled is already in libnx, but we need our
+// own that works with the global session. Actually libnx already
+// wraps it, so we can just call pctlIsRestrictionEnabled() directly.
 
-    u8 tmp = 0;
-    Result rc = serviceDispatchOut(&g_pctlSrv, 1031, tmp);
-    *enabled = (tmp != 0);
-    return rc;
+// IsRestrictionTemporaryUnlocked (IPC Cmd 1006) — libnx wraps this too.
+// We can call pctlIsRestrictionTemporaryUnlocked() directly.
+
+// SetSafetyLevel (IPC Cmd 1033) — NOT in libnx, raw IPC
+static Result myPctlSetSafetyLevel(u32 level)
+{
+    Service *srv = pctlGetServiceSession_Service();
+    serviceAssumeDomain(srv);
+    return serviceDispatchIn(srv, 1033, level);
 }
 
-// IsRestrictionTemporaryUnlocked (IPC Cmd 1006)
-// Output: bool
-static Result myPctlIsRestrictionTemporaryUnlocked(bool *unlocked)
+// DeleteSettings (IPC Cmd 1043) — NOT in libnx, raw IPC
+static Result myPctlDeleteSettings(void)
 {
-    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-
-    u8 tmp = 0;
-    Result rc = serviceDispatchOut(&g_pctlSrv, 1006, tmp);
-    *unlocked = (tmp != 0);
-    return rc;
-}
-
-// SetSafetyLevel (IPC Cmd 1033) — requires pctl:a
-// SafetyLevel 0 = no restrictions
-static Result pctlSetSafetyLevel(u32 level)
-{
-    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-
-    return serviceDispatchIn(&g_pctlSrv, 1033, level);
-}
-
-// DeleteSettings (IPC Cmd 1043) — requires pctl:a
-// Deletes ALL parental control settings (nuclear option)
-static Result pctlDeleteSettings(void)
-{
-    if (!g_pctlReady) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-
-    return serviceDispatch(&g_pctlSrv, 1043);
+    Service *srv = pctlGetServiceSession_Service();
+    serviceAssumeDomain(srv);
+    return serviceDispatch(srv, 1043);
 }
 
 // ---- Unlock / Lock parental controls ----
@@ -228,24 +150,24 @@ static Result unlockParental(void)
 {
     Result rc;
 
-    // Method 1: Try UnlockRestrictionTemporarily with PIN
-    // This is the cleanest way — temporary, doesn't modify settings permanently
-    rc = pctlUnlockRestrictionTemporarily();
+    // Method 1: UnlockRestrictionTemporarily with PIN (cleanest)
+    rc = myPctlUnlockRestrictionTemporarily();
     if (R_SUCCEEDED(rc)) {
-        // Verify it worked
         bool unlocked = false;
-        myPctlIsRestrictionTemporaryUnlocked(&unlocked);
+        pctlIsRestrictionTemporaryUnlocked(&unlocked);
         if (unlocked) return 0;
     }
 
-    // Method 2: Try SetSafetyLevel(0) via pctl:a
-    // This permanently changes the safety level to "no restriction"
-    rc = pctlSetSafetyLevel(0);
-    if (R_SUCCEEDED(rc)) return 0;
+    // Method 2: SetSafetyLevel(0) — permanent change
+    rc = myPctlSetSafetyLevel(0);
+    if (R_SUCCEEDED(rc)) {
+        bool enabled = true;
+        pctlIsRestrictionEnabled(&enabled);
+        if (!enabled) return 0;
+    }
 
-    // Method 3: Nuclear — DeleteSettings
-    // Wipes ALL parental control config
-    rc = pctlDeleteSettings();
+    // Method 3: DeleteSettings — nuclear, wipes all pctl config
+    rc = myPctlDeleteSettings();
     return rc;
 }
 
@@ -254,17 +176,15 @@ static Result lockParental(void)
     Result rc;
 
     // Method 1: Revert temporary unlock
-    rc = pctlRevertRestrictionTemporarily();
+    rc = myPctlRevertRestrictionTemporarily();
     if (R_SUCCEEDED(rc)) {
-        // Verify restriction is back
         bool enabled = false;
-        myPctlIsRestrictionEnabled(&enabled);
+        pctlIsRestrictionEnabled(&enabled);
         if (enabled) return 0;
     }
 
-    // Method 2: Set safety level back to something restrictive
-    // Safety level 10 = most restrictive (standard for kids)
-    rc = pctlSetSafetyLevel(10);
+    // Method 2: SetSafetyLevel(10) — most restrictive
+    rc = myPctlSetSafetyLevel(10);
     return rc;
 }
 
@@ -279,9 +199,12 @@ static Result closeForegroundApp(void)
     rc = smGetService(&pmsrv, "pm:shell");
     if (R_FAILED(rc)) return rc;
 
-    // pm:shell Cmd 5: GetApplicationProcessId
-    // Returns the PID of the currently running application
+    // Convert to domain for IPC calls
+    serviceConvertToDomain(&pmsrv);
+
+    // Cmd 5: GetApplicationProcessId → u64 pid
     u64 app_pid = 0;
+    serviceAssumeDomain(&pmsrv);
     rc = serviceDispatchOut(&pmsrv, 5, app_pid);
     serviceClose(&pmsrv);
 
@@ -290,12 +213,13 @@ static Result closeForegroundApp(void)
         return 0;
     }
 
-    // Connect to pm:dmnt (debug monitor) to terminate the process
+    // Close game via pm:dmnt Cmd 3: TerminateProcessByPid
     Service pmdmnt;
     rc = smGetService(&pmdmnt, "pm:dmnt");
     if (R_FAILED(rc)) return rc;
 
-    // pm:dmnt Cmd 3: TerminateProcessByPid
+    serviceConvertToDomain(&pmdmnt);
+    serviceAssumeDomain(&pmdmnt);
     rc = serviceDispatchIn(&pmdmnt, 3, app_pid);
     serviceClose(&pmdmnt);
 
@@ -306,17 +230,31 @@ static Result closeForegroundApp(void)
 int main(int argc, char **argv)
 {
     // Initialize services
-    timeInitialize();
-    fsInitialize();
+    Result rc;
+
+    rc = timeInitialize();
+    if (R_FAILED(rc)) {
+        // Can't even get time, but try to continue
+    }
+
+    rc = fsInitialize();
+    if (R_FAILED(rc)) {
+        // Can't access SD card, nothing we can do
+        writeStatus("ERROR:fs_init_failed");
+    }
+
     fsdevMountSdmc();
 
-    // Initialize pctl:a admin service
-    Result rc = pctlAdminInit();
+    // Initialize pctl service
+    // libnx's pctlInitialize tries pctl:a → pctl:s → pctl:r → pctl
+    rc = pctlInitialize();
     if (R_FAILED(rc)) {
         char err[64];
-        snprintf(err, sizeof(err), "ERROR:pctl_init_failed:0x%lx", (unsigned long)rc);
+        snprintf(err, sizeof(err), "ERROR:pctl_init:0x%lx", (unsigned long)rc);
         writeStatus(err);
+        // Don't crash — keep running so companion can see the error
     } else {
+        g_pctlReady = true;
         writeStatus("IDLE:ready");
     }
 
@@ -331,17 +269,17 @@ int main(int argc, char **argv)
 
         if (readCmd(cmd, sizeof(cmd), &param)) {
             if (strcmp(cmd, "UNLOCK") == 0 && g_state == STATE_IDLE) {
-                g_minutes = param;
+                if (!g_pctlReady) {
+                    writeStatus("ERROR:pctl_not_ready");
+                } else {
+                    g_minutes = param;
 
-                // Unlock parental control via IPC
-                if (g_pctlReady) {
+                    // Unlock parental control via IPC
                     rc = unlockParental();
                     if (R_FAILED(rc)) {
                         char err[64];
-                        snprintf(err, sizeof(err), "ERROR:unlock_failed:0x%lx", (unsigned long)rc);
+                        snprintf(err, sizeof(err), "ERROR:unlock:0x%lx", (unsigned long)rc);
                         writeStatus(err);
-                        // Don't start timer if unlock failed
-                        g_state = STATE_IDLE;
                     } else {
                         // Start countdown
                         g_deadline = getUnixSeconds() + (u64)g_minutes * 60ULL;
@@ -352,19 +290,19 @@ int main(int argc, char **argv)
                                  (unsigned long)g_minutes, (unsigned long long)g_deadline);
                         writeStatus(status);
                     }
-                } else {
-                    writeStatus("ERROR:pctl_not_ready");
                 }
 
             } else if (strcmp(cmd, "STOP") == 0 && g_state == STATE_COUNTDOWN) {
                 // Early stop — close game, then re-lock
                 closeForegroundApp();
-                svcSleepThread(500 * S_1MS); // Brief delay for process to terminate
+                svcSleepThread(500 * S_1MS);
 
-                rc = lockParental();
+                if (g_pctlReady) {
+                    rc = lockParental();
+                }
                 g_state = STATE_IDLE;
 
-                if (R_FAILED(rc)) {
+                if (g_pctlReady && R_FAILED(rc)) {
                     char err[64];
                     snprintf(err, sizeof(err), "IDLE:lock_failed:0x%lx", (unsigned long)rc);
                     writeStatus(err);
@@ -377,7 +315,11 @@ int main(int argc, char **argv)
                 char status[128];
                 switch (g_state) {
                     case STATE_IDLE:
-                        snprintf(status, sizeof(status), "IDLE:ready");
+                        if (!g_pctlReady) {
+                            snprintf(status, sizeof(status), "ERROR:pctl_not_ready");
+                        } else {
+                            snprintf(status, sizeof(status), "IDLE:ready");
+                        }
                         break;
                     case STATE_COUNTDOWN: {
                         u64 now = getUnixSeconds();
@@ -402,10 +344,12 @@ int main(int argc, char **argv)
                 closeForegroundApp();
                 svcSleepThread(500 * S_1MS);
 
-                rc = lockParental();
+                if (g_pctlReady) {
+                    rc = lockParental();
+                }
                 g_state = STATE_IDLE;
 
-                if (R_FAILED(rc)) {
+                if (g_pctlReady && R_FAILED(rc)) {
                     char err[64];
                     snprintf(err, sizeof(err), "IDLE:lock_failed:0x%lx", (unsigned long)rc);
                     writeStatus(err);
@@ -420,7 +364,7 @@ int main(int argc, char **argv)
     }
 
     // Cleanup (never reached in sysmodule, but good practice)
-    pctlAdminExit();
+    pctlExit();
     fsdevUnmountAll();
     fsExit();
     timeExit();
