@@ -59,7 +59,7 @@ export TOPDIR	:=	$(CURDIR)
 export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 			$(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
-export DEPSDIR := $(CURDIR)/$(BUILD)
+export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 
 CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
@@ -122,7 +122,7 @@ $(OUTPUT).nro	:	$(OUTPUT).elf $(OUTPUT).nacp
 
 $(OUTPUT).nacp	:	$(OUTPUT_EXE)
 	@echo generating ... $(notdir $@)
-	nacptool --create $(OUTPUT_EXE) $(TARGET) $(AUTHOR) $(VERSION) $@
+	nacptool --create "$(APP_TITLE)" "$(APP_AUTHOR)" "$(APP_VERSION)" $@
 
 $(OUTPUT).elf	:	$(OFILES)
 
@@ -151,3 +151,5 @@ endif
 APP_TITLE   := ParentalTimer
 APP_AUTHOR  := Custom
 APP_VERSION := 3.0
+
+export APP_TITLE APP_AUTHOR APP_VERSION
