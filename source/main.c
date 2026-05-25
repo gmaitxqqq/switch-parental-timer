@@ -200,6 +200,22 @@ static Result pctl_play_timer_clear(void)
     return pctl_play_timer_set_days(d);
 }
 
+// ---- Global Pad State (new libnx API) ----
+static PadState g_pad;
+
+static void initPad(void)
+{
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&g_pad);
+}
+
+// Read buttons pressed since last update
+static u64 padGetDown(void)
+{
+    padUpdate(&g_pad);
+    return padGetButtonsDown(&g_pad);
+}
+
 // ---- UI Helpers ----
 
 static const char *day_names[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
@@ -213,8 +229,7 @@ static void waitForKey(void)
 {
     printf("\n   Press any key to continue...\n");
     while (appletMainLoop()) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
         if (k) break;
         svcSleepThread(10000000ULL); // 10ms
     }
@@ -333,8 +348,7 @@ static void menuSetPlayTimer(void)
     bool done = false;
 
     while (appletMainLoop() && !done) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
 
         consoleClear();
         printf("\n");
@@ -420,8 +434,7 @@ static void menuSetUniformTimer(void)
     bool done = false;
 
     while (appletMainLoop() && !done) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
 
         consoleClear();
         printf("\n");
@@ -483,8 +496,7 @@ static void menuDeleteParentalControls(void)
     printf("   Press A to confirm, B to cancel.\n");
 
     while (appletMainLoop()) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
         if (k & HidNpadButton_A) {
             Result rc = pctl_delete_parental_controls();
             consoleClear();
@@ -514,8 +526,7 @@ static void menuDeletePairing(void)
     printf("   Press A to confirm, B to cancel.\n");
 
     while (appletMainLoop()) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
         if (k & HidNpadButton_A) {
             Result rc = pctl_delete_pairing();
             consoleClear();
@@ -545,8 +556,7 @@ static void menuClearPlayTimer(void)
     printf("   Press A to confirm, B to cancel.\n");
 
     while (appletMainLoop()) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
         if (k & HidNpadButton_A) {
             Result rc = pctl_play_timer_clear();
             consoleClear();
@@ -569,6 +579,9 @@ int main(int argc, char **argv)
 {
     consoleInit(NULL);
 
+    // Initialize pad input
+    initPad();
+
     // Initialize pctl service
     Result pctl_rc = pctlInitialize();
 
@@ -586,8 +599,7 @@ int main(int argc, char **argv)
     };
 
     while (appletMainLoop()) {
-        hidScanInput();
-        u64 k = hidKeysDown(CONTROLLER_P1_AUTO);
+        u64 k = padGetDown();
 
         consoleClear();
         printf("\n");
