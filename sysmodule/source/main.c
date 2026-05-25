@@ -1,4 +1,4 @@
-// ParentalTimer Sysmodule v6
+// ParentalTimer Sysmodule v7
 // =============================================================
 // Runs as Atmosphere sysmodule (background daemon).
 // Communicates with companion NRO via file on SD card.
@@ -10,7 +10,7 @@
 // PIN: 8473 (hardcoded) | Default: 15 min
 // Title ID: 0x4200000000000001
 // Install: sd:/atmosphere/contents/4200000000000001/exefs.nsp
-//          sd:/atmosphere/contents/4200000000000001/boot2.flag
+//          sd:/atmosphere/contents/4200000000000001/flags/boot2.flag
 // =============================================================
 
 #include <switch.h>
@@ -232,18 +232,24 @@ int main(int argc, char **argv)
     // Initialize services
     Result rc;
 
+    // Initialize time service first (lightweight)
     rc = timeInitialize();
     if (R_FAILED(rc)) {
         // Can't even get time, but try to continue
     }
 
+    // Initialize filesystem service
     rc = fsInitialize();
     if (R_FAILED(rc)) {
         // Can't access SD card, nothing we can do
-        writeStatus("ERROR:fs_init_failed");
+        // But we can't write status either... just continue
     }
 
-    fsdevMountSdmc();
+    rc = fsdevMountSdmc();
+    if (R_FAILED(rc)) {
+        // SD card mount failed
+        writeStatus("ERROR:sd_mount_failed");
+    }
 
     // Initialize pctl service
     // libnx's pctlInitialize tries pctl:a → pctl:s → pctl:r → pctl
