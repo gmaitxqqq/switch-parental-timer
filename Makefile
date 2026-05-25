@@ -148,8 +148,8 @@ endif
 #---------------------------------------------------------------------------------
 # NRO metadata
 #---------------------------------------------------------------------------------
-APP_TITLE   := 家长控制管理器
+APP_TITLE   := Parental Control Manager
 APP_AUTHOR  := Custom
-APP_VERSION := 11.3
+APP_VERSION := 11.4
 
 export APP_TITLE APP_AUTHOR APP_VERSION

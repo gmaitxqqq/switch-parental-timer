@@ -1,20 +1,20 @@
-// Switch 家长控制管理器 v11.3
+// Switch Parental Control Manager v11.4
 // =============================================================
-// 纯 .nro homebrew 应用 — 无需 sysmodule
+// Pure .nro homebrew app — no sysmodule required
 //
-// 基于 NX-Pctl-Manager (tailiang2008) 和
-// Reset-Parental-Controls-NX_Mod (nangongjing1) 的 pctl IPC 调用
+// Based on NX-Pctl-Manager (tailiang2008) and
+// Reset-Parental-Controls-NX_Mod (nangongjing1) pctl IPC calls
 //
-// 关键要点:
-//   - pctlInitialize() 在普通 .nro 进程中正常工作
-//   - sysmodule 无法访问 pctl 服务 (v1-v10 失败根因)
-//   - SetPlayTimerSettingsForDebug (cmd 195101) 兼容 fw 22.1.0
-//   - UnlockRestrictionTemporarily (cmd 1201) 读取PIN后回传
-//   - PlayTimerSettings 布局: u16[34], 每日组在[7+4n], 分钟在[7+4n+2]
+// Key points:
+//   - pctlInitialize() works in normal .nro process
+//   - sysmodule cannot access pctl service (v1-v10 failure root cause)
+//   - SetPlayTimerSettingsForDebug (cmd 195101) compatible with fw 22.1.0
+//   - UnlockRestrictionTemporarily (cmd 1201) reads PIN and passes it back
+//   - PlayTimerSettings layout: u16[34], per-day at [7+4n], minutes at [7+4n+2]
 //
-// 关键: printf 后必须调 consoleUpdate(NULL) 才能刷新到屏幕!
+// CRITICAL: printf requires consoleUpdate(NULL) to flush to screen!
 //
-// 兼容: Atmosphere CFW + fw 22.1.0 (AMS 1.11.1)
+// Compatible: Atmosphere CFW + fw 22.1.0 (AMS 1.11.1)
 // =============================================================
 
 #include <switch.h>
@@ -22,10 +22,10 @@
 #include <string.h>
 #include <stdlib.h>
 
-// ---- 常量 ----
+// ---- Constants ----
 #define PT_DAY_NOLIMIT 0xFFFFu
 
-// 家长控制安全等级
+// Parental control safety levels
 enum {
     PctlSafetyLevel_None       = 0,
     PctlSafetyLevel_Custom     = 1,
@@ -34,7 +34,7 @@ enum {
     PctlSafetyLevel_Teen       = 4,
 };
 
-// ---- Pctl 状态 ----
+// ---- Pctl Status ----
 typedef struct {
     bool safety_level_ok;
     u32  safety_level;
@@ -44,16 +44,16 @@ typedef struct {
     bool restriction_enabled;
 } PctlStatus;
 
-// ---- 游玩计时器状态 ----
+// ---- Play Timer State ----
 typedef struct {
     bool valid;
     bool enabled;
     bool restricted;
     u64  remaining_ns;
-    u16  day_min[7];  // 周日..周六
+    u16  day_min[7];  // Sun..Sat
 } PtState;
 
-// ---- Pctl 服务操作 (源自 NX-Pctl-Manager pctl_ops.c) ----
+// ---- Pctl Service Operations (from NX-Pctl-Manager pctl_ops.c) ----
 
 static Result pctl_ops_reinit(void)
 {
@@ -87,7 +87,7 @@ static void pctl_status_fetch(PctlStatus *out)
 
 static Result pctl_set_pin(void)
 {
-    // pctlauth 小程序会打开自己的 pctl 会话，所以调用前后需要关闭/重开
+    // pctlauth applet opens its own pctl session, so close/reopen around it
     pctlExit();
     Result rc = pctlauthRegisterPasscode();
     pctlInitialize();
@@ -106,8 +106,8 @@ static Result pctl_delete_pairing(void)
 
 static Result pctl_unlock_restriction_temporarily(void)
 {
-    // 通过 GetPinCode (cmd 1208) 读取当前 PIN，
-    // 然后传给 UnlockRestrictionTemporarily (cmd 1201)
+    // Read current PIN via GetPinCode (cmd 1208),
+    // then pass it to UnlockRestrictionTemporarily (cmd 1201)
     pctl_ops_reinit();
     Service *srv = pctlGetServiceSession_Service();
 
@@ -128,16 +128,16 @@ static Result pctl_unlock_restriction_temporarily(void)
 static const char *safety_level_name(u32 level)
 {
     switch (level) {
-        case PctlSafetyLevel_None:       return "无";
-        case PctlSafetyLevel_Custom:     return "自定义";
-        case PctlSafetyLevel_YoungChild: return "幼童";
-        case PctlSafetyLevel_Child:      return "儿童";
-        case PctlSafetyLevel_Teen:       return "青少年";
-        default:                         return "未知";
+        case PctlSafetyLevel_None:       return "None";
+        case PctlSafetyLevel_Custom:     return "Custom";
+        case PctlSafetyLevel_YoungChild: return "Young Child";
+        case PctlSafetyLevel_Child:      return "Child";
+        case PctlSafetyLevel_Teen:       return "Teen";
+        default:                         return "Unknown";
     }
 }
 
-// ---- 游玩计时器操作 (源自 NX-Pctl-Manager pctl_ops.c) ----
+// ---- Play Timer Operations (from NX-Pctl-Manager pctl_ops.c) ----
 
 static void pctl_play_timer_query(PtState *out)
 {
@@ -197,7 +197,7 @@ static Result pctl_play_timer_clear(void)
     return pctl_play_timer_set_days(d);
 }
 
-// ---- 手柄输入 (新版 libnx API) ----
+// ---- Pad Input (new libnx API) ----
 static PadState g_pad;
 
 static void initPad(void)
@@ -212,9 +212,9 @@ static u64 padGetDown(void)
     return padGetButtonsDown(&g_pad);
 }
 
-// ---- UI 辅助 ----
+// ---- UI Helpers ----
 
-static const char *day_names[7] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+static const char *day_names[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
 static void printSeparator(void)
 {
@@ -228,7 +228,7 @@ static void consoleFlush(void)
 
 static void waitForKey(void)
 {
-    printf("\n   按任意键继续...\n");
+    printf("\n   Press any key to continue...\n");
     consoleFlush();
     while (appletMainLoop()) {
         u64 k = padGetDown();
@@ -238,14 +238,14 @@ static void waitForKey(void)
     }
 }
 
-// ---- 菜单界面 ----
+// ---- Menu Screens ----
 
 static void showStatus(void)
 {
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   当前状态\n");
+    printf("   Current Status\n");
     printSeparator();
     printf("\n");
     consoleFlush();
@@ -254,19 +254,19 @@ static void showStatus(void)
     pctl_status_fetch(&st);
 
     if (st.safety_level_ok)
-        printf("   安全等级:    %s (%u)\n", safety_level_name(st.safety_level), st.safety_level);
+        printf("   Safety Level:  %s (%u)\n", safety_level_name(st.safety_level), st.safety_level);
     else
-        printf("   安全等级:    (不可用)\n");
+        printf("   Safety Level:  (unavailable)\n");
 
     if (st.pin_length_ok)
-        printf("   PIN长度:     %u %s\n", st.pin_length, st.pin_length > 0 ? "(已设置)" : "(未设置)");
+        printf("   PIN Length:    %u %s\n", st.pin_length, st.pin_length > 0 ? "(set)" : "(not set)");
     else
-        printf("   PIN长度:     (不可用)\n");
+        printf("   PIN Length:    (unavailable)\n");
 
     if (st.restriction_enabled_ok)
-        printf("   限制状态:    %s\n", st.restriction_enabled ? "已启用" : "未启用");
+        printf("   Restriction:   %s\n", st.restriction_enabled ? "Enabled" : "Disabled");
     else
-        printf("   限制状态:    (不可用)\n");
+        printf("   Restriction:   (unavailable)\n");
 
     printf("\n");
     consoleFlush();
@@ -274,26 +274,26 @@ static void showStatus(void)
     PtState pt;
     pctl_play_timer_query(&pt);
 
-    printf("   游玩计时器:\n");
-    printf("   已启用:      %s\n", pt.enabled ? "是" : "否");
-    printf("   今日受限:    %s\n", pt.restricted ? "是 (今日时间已到)" : "否");
+    printf("   Play Timer:\n");
+    printf("   Enabled:       %s\n", pt.enabled ? "Yes" : "No");
+    printf("   Today Limited: %s\n", pt.restricted ? "Yes (time up today)" : "No");
 
     if (pt.remaining_ns > 0) {
         u64 rem_min = pt.remaining_ns / 60000000000ULL;
-        printf("   剩余时间:    %llu 分钟\n", (unsigned long long)rem_min);
+        printf("   Remaining:     %llu min\n", (unsigned long long)rem_min);
     }
 
-    printf("\n   每日时长限制 (分钟):\n");
+    printf("\n   Daily Time Limits (minutes):\n");
     for (int i = 0; i < 7; i++) {
         if (pt.day_min[i] == PT_DAY_NOLIMIT)
-            printf("     %s: 无限制\n", day_names[i]);
+            printf("     %s: No limit\n", day_names[i]);
         else
-            printf("     %s: %u 分钟 (%u小时%u分钟)\n", day_names[i],
+            printf("     %s: %u min (%uh %um)\n", day_names[i],
                    pt.day_min[i], pt.day_min[i] / 60, pt.day_min[i] % 60);
     }
 
     if (!pt.valid)
-        printf("\n   (无法读取计时器设置)\n");
+        printf("\n   (Could not read timer settings)\n");
 
     waitForKey();
 }
@@ -303,20 +303,21 @@ static void menuSetPin(void)
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   设置/修改 PIN\n");
+    printf("   Set / Change PIN\n");
     printSeparator();
     printf("\n");
-    printf("   将打开系统 PIN 设置界面。\n");
-    printf("   可以设置新 PIN 或修改已有的 PIN。\n\n");
+    printf("   Will open the system PIN setup screen.\n");
+    printf("   You can set a new PIN or change the\n");
+    printf("   existing one.\n\n");
     consoleFlush();
 
     Result rc = pctl_set_pin();
     consoleClear();
     printf("\n");
     if (R_SUCCEEDED(rc))
-        printf("   PIN 设置成功!\n");
+        printf("   PIN set successfully!\n");
     else
-        printf("   设置失败: 0x%08X\n", (unsigned)rc);
+        printf("   Failed: 0x%08X\n", (unsigned)rc);
 
     waitForKey();
 }
@@ -326,18 +327,18 @@ static void menuUnlockTemporarily(void)
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   临时解锁\n");
+    printf("   Unlock Temporarily\n");
     printSeparator();
     printf("\n");
-    printf("   自动读取当前 PIN 并临时解除\n");
-    printf("   家长控制限制。\n\n");
+    printf("   Auto-reads current PIN and temporarily\n");
+    printf("   lifts parental control restrictions.\n\n");
     consoleFlush();
 
     Result rc = pctl_unlock_restriction_temporarily();
     if (R_SUCCEEDED(rc))
-        printf("   解锁成功!\n");
+        printf("   Unlocked successfully!\n");
     else
-        printf("   解锁失败: 0x%08X\n", (unsigned)rc);
+        printf("   Unlock failed: 0x%08X\n", (unsigned)rc);
 
     waitForKey();
 }
@@ -345,12 +346,12 @@ static void menuUnlockTemporarily(void)
 static void menuSetPlayTimer(void)
 {
     u16 days[7];
-    // 读取当前值
+    // Read current values
     PtState pt;
     pctl_play_timer_query(&pt);
     for (int i = 0; i < 7; i++) days[i] = pt.day_min[i];
 
-    int cursor = 0;  // 0..6 = 每日, 7 = 应用, 8 = 取消
+    int cursor = 0;  // 0..6 = per-day, 7 = apply, 8 = cancel
     bool editing_value = false;
     u16 edit_val = 0;
     bool done = false;
@@ -361,36 +362,36 @@ static void menuSetPlayTimer(void)
         consoleClear();
         printf("\n");
         printSeparator();
-        printf("   设置每周游玩时长\n");
+        printf("   Set Weekly Play Time\n");
         printSeparator();
         printf("\n");
-        printf("   每日游玩时长限制 (分钟)\n");
-        printf("   0=全天禁止  65535=无限制\n\n");
+        printf("   Daily play time limits (minutes)\n");
+        printf("   0=blocked all day  65535=no limit\n\n");
 
         for (int i = 0; i < 7; i++) {
             bool sel = (!editing_value && cursor == i);
             if (editing_value && cursor == i) {
-                printf("   %s %s [%u 分钟]  <- 编辑中\n",
+                printf("   %s %s [%u min]  <- editing\n",
                        sel ? ">" : " ",
                        day_names[i], edit_val);
-                printf("     上/下: +/-1  L/R: +/-10\n");
-                printf("     A=确认  B=取消\n");
+                printf("     Up/Down: +/-1  L/R: +/-10\n");
+                printf("     A=Confirm  B=Cancel\n");
             } else {
                 if (days[i] == PT_DAY_NOLIMIT)
-                    printf("   %s %s  无限制\n",
+                    printf("   %s %s  No limit\n",
                            sel ? ">" : " ", day_names[i]);
                 else
-                    printf("   %s %s  %u 分钟 (%u小时%u分钟)\n",
+                    printf("   %s %s  %u min (%uh %um)\n",
                            sel ? ">" : " ", day_names[i],
                            days[i], days[i] / 60, days[i] % 60);
             }
         }
 
         printf("\n");
-        printf("   %s [ 应用 ]\n", (!editing_value && cursor == 7) ? ">" : " ");
-        printf("   %s [ 取消 ]\n", (!editing_value && cursor == 8) ? ">" : " ");
+        printf("   %s [ Apply ]\n", (!editing_value && cursor == 7) ? ">" : " ");
+        printf("   %s [ Cancel ]\n", (!editing_value && cursor == 8) ? ">" : " ");
         printf("\n");
-        printf("   A=选择/编辑  B=取消  X=全部设为15分钟\n");
+        printf("   A=Select/Edit  B=Back  X=Set all 15min\n");
         consoleFlush();
 
         if (editing_value) {
@@ -398,8 +399,8 @@ static void menuSetPlayTimer(void)
             if (k & HidNpadButton_Down)  { if (edit_val > 0) edit_val -= 1; }
             if (k & HidNpadButton_Right) { if (edit_val <= 65525) edit_val += 10; }
             if (k & HidNpadButton_Left)  { if (edit_val >= 10) edit_val -= 10; else edit_val = 0; }
-            if (k & HidNpadButton_R)     { edit_val = PT_DAY_NOLIMIT; }  // R = 无限制
-            if (k & HidNpadButton_L)     { edit_val = 0; }               // L = 全天禁止
+            if (k & HidNpadButton_R)     { edit_val = PT_DAY_NOLIMIT; }  // R = no limit
+            if (k & HidNpadButton_L)     { edit_val = 0; }               // L = blocked
             if (k & HidNpadButton_A)     { days[cursor] = edit_val; editing_value = false; }
             if (k & HidNpadButton_B)     { editing_value = false; }
         } else {
@@ -410,14 +411,14 @@ static void menuSetPlayTimer(void)
                     editing_value = true;
                     edit_val = days[cursor];
                 } else if (cursor == 7) {
-                    // 应用
+                    // Apply
                     Result rc = pctl_play_timer_set_days(days);
                     consoleClear();
                     printf("\n");
                     if (R_SUCCEEDED(rc))
-                        printf("   游玩时长设置成功!\n");
+                        printf("   Play time set successfully!\n");
                     else
-                        printf("   设置失败: 0x%08X\n", (unsigned)rc);
+                        printf("   Failed: 0x%08X\n", (unsigned)rc);
                     waitForKey();
                     done = true;
                 } else {
@@ -426,7 +427,7 @@ static void menuSetPlayTimer(void)
             }
             if (k & HidNpadButton_B) done = true;
             if (k & HidNpadButton_X) {
-                // 快速设置: 全部15分钟
+                // Quick set: all 15 minutes
                 for (int i = 0; i < 7; i++) days[i] = 15;
             }
         }
@@ -446,23 +447,24 @@ static void menuSetUniformTimer(void)
         consoleClear();
         printf("\n");
         printSeparator();
-        printf("   统一设置每日时长\n");
+        printf("   Set Uniform Daily Time\n");
         printSeparator();
         printf("\n");
-        printf("   为每天的游玩时长设置相同的限制。\n\n");
+        printf("   Set the same play time limit for\n");
+        printf("   every day of the week.\n\n");
         if (minutes == PT_DAY_NOLIMIT)
-            printf("   游玩时长: [ 无限制 ]\n\n");
+            printf("   Play time: [ No limit ]\n\n");
         else if (minutes == 0)
-            printf("   游玩时长: [ 0 分钟 (全天禁止) ]\n\n");
+            printf("   Play time: [ 0 min (blocked) ]\n\n");
         else
-            printf("   游玩时长: [ %u 分钟 ] (%u小时%u分钟)\n\n",
+            printf("   Play time: [ %u min ] (%uh %um)\n\n",
                    minutes, minutes / 60, minutes % 60);
-        printf("   上/下:    +/- 1 分钟\n");
-        printf("   左/右:    +/- 10 分钟\n");
-        printf("   L: 全天禁止 (0分钟)\n");
-        printf("   R: 无限制\n\n");
-        printf("   A : 应用\n");
-        printf("   B : 取消\n");
+        printf("   Up/Down:  +/- 1 min\n");
+        printf("   Left/Right: +/- 10 min\n");
+        printf("   L: Blocked (0 min)\n");
+        printf("   R: No limit\n\n");
+        printf("   A : Apply\n");
+        printf("   B : Cancel\n");
         consoleFlush();
 
         if (k & HidNpadButton_Up)    { if (minutes < 65535) minutes += 1; if (minutes == PT_DAY_NOLIMIT) minutes = 65534; }
@@ -478,13 +480,13 @@ static void menuSetUniformTimer(void)
             printf("\n");
             if (R_SUCCEEDED(rc)) {
                 if (minutes == PT_DAY_NOLIMIT)
-                    printf("   已清除时长限制 (无限制)!\n");
+                    printf("   Time limit cleared (no limit)!\n");
                 else if (minutes == 0)
-                    printf("   已设置全天禁止!\n");
+                    printf("   Blocked all day!\n");
                 else
-                    printf("   已设置每天 %u 分钟!\n", minutes);
+                    printf("   Set %u min/day successfully!\n", minutes);
             } else {
-                printf("   设置失败: 0x%08X\n", (unsigned)rc);
+                printf("   Failed: 0x%08X\n", (unsigned)rc);
             }
             waitForKey();
             done = true;
@@ -500,12 +502,13 @@ static void menuDeleteParentalControls(void)
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   !!! 删除家长控制 !!!\n");
+    printf("   !!! DELETE Parental Controls !!!\n");
     printSeparator();
     printf("\n");
-    printf("   警告: 此操作不可恢复!\n");
-    printf("   将删除 PIN 和所有限制设置。\n\n");
-    printf("   按 A 确认, B 取消。\n");
+    printf("   WARNING: This cannot be undone!\n");
+    printf("   Will delete PIN and all restriction\n");
+    printf("   settings.\n\n");
+    printf("   Press A to confirm, B to cancel.\n");
     consoleFlush();
 
     while (appletMainLoop()) {
@@ -515,9 +518,9 @@ static void menuDeleteParentalControls(void)
             consoleClear();
             printf("\n");
             if (R_SUCCEEDED(rc))
-                printf("   家长控制已删除!\n");
+                printf("   Parental controls deleted!\n");
             else
-                printf("   删除失败: 0x%08X\n", (unsigned)rc);
+                printf("   Delete failed: 0x%08X\n", (unsigned)rc);
             waitForKey();
             break;
         }
@@ -532,12 +535,13 @@ static void menuDeletePairing(void)
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   删除手机配对\n");
+    printf("   Delete Phone Pairing\n");
     printSeparator();
     printf("\n");
-    printf("   解除 Nintendo Switch 家长控制\n");
-    printf("   手机 App 与此主机的绑定。\n\n");
-    printf("   按 A 确认, B 取消。\n");
+    printf("   Unlink the Nintendo Switch Parental\n");
+    printf("   Controls smartphone app from this\n");
+    printf("   console.\n\n");
+    printf("   Press A to confirm, B to cancel.\n");
     consoleFlush();
 
     while (appletMainLoop()) {
@@ -547,9 +551,9 @@ static void menuDeletePairing(void)
             consoleClear();
             printf("\n");
             if (R_SUCCEEDED(rc))
-                printf("   手机配对已删除!\n");
+                printf("   Phone pairing deleted!\n");
             else
-                printf("   删除失败: 0x%08X\n", (unsigned)rc);
+                printf("   Delete failed: 0x%08X\n", (unsigned)rc);
             waitForKey();
             break;
         }
@@ -564,12 +568,12 @@ static void menuClearPlayTimer(void)
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   清除游玩时长限制\n");
+    printf("   Clear Play Time Limits\n");
     printSeparator();
     printf("\n");
-    printf("   移除每日游玩时长限制。\n");
-    printf("   计时器将被关闭。\n\n");
-    printf("   按 A 确认, B 取消。\n");
+    printf("   Remove daily play time limits.\n");
+    printf("   The timer will be disabled.\n\n");
+    printf("   Press A to confirm, B to cancel.\n");
     consoleFlush();
 
     while (appletMainLoop()) {
@@ -579,9 +583,9 @@ static void menuClearPlayTimer(void)
             consoleClear();
             printf("\n");
             if (R_SUCCEEDED(rc))
-                printf("   游玩时长限制已清除!\n");
+                printf("   Play time limits cleared!\n");
             else
-                printf("   清除失败: 0x%08X\n", (unsigned)rc);
+                printf("   Clear failed: 0x%08X\n", (unsigned)rc);
             waitForKey();
             break;
         }
@@ -591,67 +595,68 @@ static void menuClearPlayTimer(void)
     }
 }
 
-// ---- 主菜单 ----
+// ---- Main Menu ----
 
 int main(int argc, char **argv)
 {
     consoleInit(NULL);
 
-    // 立即显示启动画面
+    // Show splash immediately
     consoleClear();
     printf("\n");
     printSeparator();
-    printf("   Switch 家长控制管理器\n");
-    printf("   v11.3 - 兼容 fw 22.1.0\n");
+    printf("   Switch Parental Control Manager\n");
+    printf("   v11.4 - fw 22.1.0 compatible\n");
     printSeparator();
     printf("\n");
-    printf("   正在初始化...\n");
+    printf("   Initializing...\n");
     consoleFlush();
 
-    // 初始化手柄
+    // Initialize pad
     initPad();
 
-    // 初始化 pctl 服务
+    // Initialize pctl service
     Result pctl_rc = pctlInitialize();
 
     if (R_FAILED(pctl_rc)) {
-        printf("\n   !! pctl 初始化失败: 0x%08X\n", (unsigned)pctl_rc);
-        printf("   !! 请确保运行在 CFW (Atmosphere) 环境\n");
-        printf("   !! 部分功能可能无法使用。\n\n");
+        printf("\n   !! pctl init failed: 0x%08X\n", (unsigned)pctl_rc);
+        printf("   !! Make sure you are running under\n");
+        printf("   !! CFW (Atmosphere). Some features\n");
+        printf("   !! may not work.\n\n");
         consoleFlush();
     } else {
-        printf("   pctl 服务初始化成功。\n\n");
+        printf("   pctl service initialized OK.\n\n");
         consoleFlush();
     }
 
     int cursor = 0;
     const int menu_count = 8;
     const char *menu_items[] = {
-        "查看当前状态",
-        "设置/修改 PIN",
-        "临时解锁",
-        "设置每周游玩时长 (按天)",
-        "统一设置每日时长",
-        "清除游玩时长限制",
-        "删除家长控制",
-        "删除手机配对",
+        "View Current Status",
+        "Set / Change PIN",
+        "Unlock Temporarily",
+        "Set Weekly Play Time (per day)",
+        "Set Uniform Daily Time",
+        "Clear Play Time Limits",
+        "Delete Parental Controls",
+        "Delete Phone Pairing",
     };
 
-    // 主循环
+    // Main loop
     while (appletMainLoop()) {
         u64 k = padGetDown();
 
         consoleClear();
         printf("\n");
         printSeparator();
-        printf("   Switch 家长控制管理器\n");
-        printf("   v11.3 - 兼容 fw 22.1.0\n");
+        printf("   Switch Parental Control Manager\n");
+        printf("   v11.4 - fw 22.1.0 compatible\n");
         printSeparator();
         printf("\n");
 
         if (R_FAILED(pctl_rc)) {
-            printf("   !! pctl 初始化失败: 0x%08X\n", (unsigned)pctl_rc);
-            printf("   !! 请确保运行在 CFW 环境\n\n");
+            printf("   !! pctl init failed: 0x%08X\n", (unsigned)pctl_rc);
+            printf("   !! Make sure CFW is active\n\n");
         }
 
         for (int i = 0; i < menu_count; i++) {
@@ -659,7 +664,7 @@ int main(int argc, char **argv)
         }
 
         printf("\n");
-        printf("   上/下: 导航   A: 选择   B: 退出\n");
+        printf("   Up/Down: Navigate   A: Select   B: Exit\n");
 
         consoleFlush();
 
