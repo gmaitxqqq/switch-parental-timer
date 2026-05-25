@@ -1,0 +1,117 @@
+name: Build Switch ParentalTimer
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+      env:
+        DEVKITPRO: /opt/devkitpro
+        DEVKITA64: /opt/devkitpro/devkitA64
+        PATH: /opt/devkitpro/devkitA64/bin:/opt/devkitpro/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify environment
+        run: |
+          echo "DEVKITPRO=$DEVKITPRO"
+          aarch64-none-elf-gcc --version
+          ls $DEVKITPRO/libnx/include/switch.h && echo "libnx found"
+          which npdmtool && echo "npdmtool found" || echo "npdmtool NOT found"
+          which nacptool && echo "nacptool found" || echo "nacptool NOT found"
+          which elf2nro && echo "elf2nro found" || echo "elf2nro NOT found"
+          which elf2nso && echo "elf2nso found" || echo "elf2nso NOT found"
+
+      - name: Build sysmodule
+        run: |
+          cd sysmodule
+          make -j$(nproc)
+
+      - name: Build companion NRO
+        run: |
+          cd companion
+          make -j$(nproc)
+
+      - name: List outputs
+        run: |
+          echo "=== Sysmodule outputs ==="
+          ls -lh sysmodule/*.nsp sysmodule/*.nso 2>/dev/null || echo "No sysmodule outputs"
+          echo "=== Companion outputs ==="
+          ls -lh companion/*.nro 2>/dev/null || echo "No companion outputs"
+
+      - name: Prepare deploy structure
+        run: |
+          mkdir -p deploy/atmosphere/contents/4200000000000001
+          mkdir -p deploy/switch
+
+          # Sysmodule: NSP goes to atmosphere/contents/
+          if [ -f sysmodule/sysmodule.nsp ]; then
+            cp sysmodule/sysmodule.nsp deploy/atmosphere/contents/4200000000000001/exefs.nsp
+            touch deploy/atmosphere/contents/4200000000000001/boot2.flag
+            echo "Sysmodule NSP packaged"
+          else
+            echo "WARNING: sysmodule.nsp not found"
+            ls -la sysmodule/
+          fi
+
+          # Companion NRO goes to /switch/
+          if [ -f companion/parental_timer.nro ]; then
+            cp companion/parental_timer.nro deploy/switch/
+            echo "Companion NRO packaged"
+          else
+            echo "WARNING: parental_timer.nro not found"
+            ls -la companion/
+          fi
+
+          # Create a simple install instruction
+          cat > deploy/INSTALL.txt << 'EOF'
+          ParentalTimer Installation
+          ========================
+          
+          1. Copy the ENTIRE "atmosphere" folder to your SD card root
+             (merge with existing atmosphere folder)
+          
+          2. Copy "switch" folder contents to SD:/switch/
+          
+          3. Reboot your Switch into CFW
+          
+          4. Open Album to find "ParentalTimer" app
+          
+          5. Select duration and press A
+          
+          6. The sysmodule will auto-unlock parental control,
+             run the timer in background, and re-lock when done.
+          
+          PIN: 8473
+          EOF
+
+      - name: Upload Sysmodule NSP
+        uses: actions/upload-artifact@v4
+        with:
+          name: parental_timer_sysmodule
+          path: deploy/atmosphere/
+          retention-days: 30
+
+      - name: Upload Companion NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: parental_timer_companion
+          path: deploy/switch/
+          retention-days: 30
+
+      - name: Upload Full Deploy Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: parental_timer_full
+          path: deploy/
+          retention-days: 30
