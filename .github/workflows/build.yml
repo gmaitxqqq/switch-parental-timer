@@ -1,4 +1,4 @@
-name: Build Switch ParentalTimer v8
+name: Build Switch ParentalTimer v9
 
 on:
   push:
@@ -47,23 +47,22 @@ jobs:
       - name: List outputs
         run: |
           echo "=== Sysmodule outputs ==="
-          ls -lh sysmodule/*.nsp sysmodule/*.nso 2>/dev/null || echo "No sysmodule outputs in root"
           find sysmodule/ -name "*.nsp" -o -name "*.nso" | head -5
           echo "=== Companion outputs ==="
           ls -lh companion/*.nro 2>/dev/null || echo "No companion outputs"
 
       - name: Prepare deploy structure
         run: |
-          mkdir -p deploy/atmosphere/contents/4200000000000001/flags
+          mkdir -p deploy/atmosphere/contents/4200000000003103/flags
           mkdir -p deploy/switch
 
           # Sysmodule: NSP goes to atmosphere/contents/
           NSP_FILE=$(find sysmodule/ -name "*.nsp" -type f | head -1)
           if [ -n "$NSP_FILE" ]; then
-            cp "$NSP_FILE" deploy/atmosphere/contents/4200000000000001/exefs.nsp
-            touch deploy/atmosphere/contents/4200000000000001/flags/boot2.flag
-            echo '{"name":"ParentalTimer","tid":"4200000000000001","requires_reboot":false}' > deploy/atmosphere/contents/4200000000000001/toolbox.json
-            echo "Sysmodule NSP packaged: $(ls -lh deploy/atmosphere/contents/4200000000000001/exefs.nsp)"
+            cp "$NSP_FILE" deploy/atmosphere/contents/4200000000003103/exefs.nsp
+            touch deploy/atmosphere/contents/4200000000003103/flags/boot2.flag
+            echo '{"name":"ParentalTimer","tid":"4200000000003103","requires_reboot":false}' > deploy/atmosphere/contents/4200000000003103/toolbox.json
+            echo "Sysmodule NSP packaged: $(ls -lh deploy/atmosphere/contents/4200000000003103/exefs.nsp)"
           else
             echo "ERROR: No .nsp file found!"
             find sysmodule/ -type f | head -20
@@ -82,6 +81,6 @@ jobs:
       - name: Upload Full Deploy Package
         uses: actions/upload-artifact@v4
         with:
-          name: parental_timer_full_v8
+          name: parental_timer_full_v9
           path: deploy/
           retention-days: 30

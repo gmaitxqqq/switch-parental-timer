@@ -1,4 +1,4 @@
-// ParentalTimer Companion App v8
+// ParentalTimer Companion App v9
 // =============================================================
 // NRO app launched from Homebrew Menu (Album).
 // UI: select duration -> sends command to sysmodule -> done.
@@ -63,7 +63,7 @@ int main(int argc, char **argv)
         consoleClear();
         printf("\n\n");
         printf("  ===============================\n");
-        printf("   Parental Timer Companion v8\n");
+        printf("   Parental Timer Companion v9\n");
         printf("  ===============================\n\n");
 
         if (!started) {
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
                 printf("   Make sure parental_timer sysmodule\n");
                 printf("   is installed in:\n");
                 printf("   sd:/atmosphere/contents/\n");
-                printf("   4200000000000001/\n\n");
+                printf("   4200000000003103/\n\n");
                 printf("   B : EXIT\n");
             } else {
                 printf("   Waiting for sysmodule...\n\n");
