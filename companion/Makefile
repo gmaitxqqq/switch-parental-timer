@@ -122,7 +122,7 @@ $(OUTPUT).nro	:	$(OUTPUT).elf $(OUTPUT).nacp
 
 $(OUTPUT).nacp	:	$(OUTPUT_EXE)
 	@echo generating ... $(notdir $@)
-	napcotool --create $(OUTPUT_EXE) $(TARGET) $(AUTHOR) $(VERSION) $@
+	nacptool --create $(OUTPUT_EXE) $(TARGET) $(AUTHOR) $(VERSION) $@
 
 $(OUTPUT).elf	:	$(OFILES)
 
