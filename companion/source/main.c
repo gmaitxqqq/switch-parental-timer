@@ -1,12 +1,13 @@
-// ParentalTimer Companion App v3
+// ParentalTimer Companion App v5
 // =============================================================
 // NRO app launched from Homebrew Menu (Album).
 // UI: select duration -> sends command to sysmodule -> done.
 //
 // Communication: writes "UNLOCK <minutes>" to
 //   sdmc:/parental_timer.cmd
-// The sysmodule reads this file, unlocks parental control,
-// starts timer, and auto re-locks when time's up.
+// The sysmodule reads this file, unlocks parental control
+// via IPC (instant, no button simulation), starts timer,
+// and auto re-locks when time's up.
 // =============================================================
 
 #include <switch.h>
@@ -62,7 +63,7 @@ int main(int argc, char **argv)
         consoleClear();
         printf("\n\n");
         printf("  ===============================\n");
-        printf("   Parental Timer Companion v3\n");
+        printf("   Parental Timer Companion v5\n");
         printf("  ===============================\n\n");
 
         if (!started) {
@@ -131,18 +132,14 @@ int main(int argc, char **argv)
                     started = false;
                     min = DEF_MIN;
                 }
-            } else if (strncmp(status, "UNLOCKING", 9) == 0) {
-                printf("   Unlocking parental control...\n");
-                printf("   Please wait, don't touch controller.\n\n");
-                printf("   B : EXIT\n");
-            } else if (strncmp(status, "LOCKING", 7) == 0) {
-                printf("   Re-locking parental control...\n");
-                printf("   Please wait.\n\n");
-                printf("   B : EXIT\n");
             } else if (strncmp(status, "ERROR", 5) == 0) {
-                printf("   ERROR: Sysmodule virtual pad failed.\n");
-                printf("   %s\n\n", status);
+                printf("   ERROR: %s\n\n", status);
+                printf("   A : Retry\n");
                 printf("   B : EXIT\n");
+                if (k & HidNpadButton_A) {
+                    started = false;
+                    min = DEF_MIN;
+                }
             } else if (strncmp(status, "UNKNOWN", 7) == 0) {
                 printf("   ** Sysmodule not detected! **\n\n");
                 printf("   Make sure parental_timer sysmodule\n");
