@@ -1,4 +1,4 @@
-// Switch Parental Control Manager v11
+// Switch Parental Control Manager v11.2
 // =============================================================
 // Pure .nro homebrew app - NO sysmodule needed.
 //
@@ -12,6 +12,8 @@
 //   - UnlockRestrictionTemporarily (cmd 1201) reads PIN via GetPinCode (cmd 1208)
 //     and passes it back - works even if user forgot the PIN
 //   - PlayTimerSettings layout: u16[34], per-day groups at [7+4n], minutes at [7+4n+2]
+//
+// CRITICAL: consoleUpdate(NULL) must be called after printf to flush to screen!
 //
 // Compatible: Atmosphere CFW + fw 22.1.0 (AMS 1.11.1)
 // =============================================================
@@ -107,9 +109,6 @@ static Result pctl_unlock_restriction_temporarily(void)
 {
     // Read current PIN via GetPinCode (cmd 1208) and pass it back to
     // UnlockRestrictionTemporarily (cmd 1201).
-    // Verified on fw 22.1.0:
-    //   - Buffer must be HIPC pointer type (not map-alias)
-    //   - PIN must be NUL-terminated (digits + '\0')
     pctl_ops_reinit();
     Service *srv = pctlGetServiceSession_Service();
 
@@ -181,7 +180,6 @@ static Result pctl_play_timer_set_days(const u16 days_min[7])
             c[7 + 4 * n + 2] = days_min[n];
         }
     }
-    // All-zero struct -> play timer turned off
 
     return serviceDispatchIn(pctlGetServiceSession_Service(), 195101, c);
 }
@@ -225,12 +223,20 @@ static void printSeparator(void)
     printf("  ========================================\n");
 }
 
+// Convenience: print + flush to screen immediately
+static void consoleFlush(void)
+{
+    consoleUpdate(NULL);
+}
+
 static void waitForKey(void)
 {
     printf("\n   Press any key to continue...\n");
+    consoleFlush();
     while (appletMainLoop()) {
         u64 k = padGetDown();
         if (k) break;
+        consoleFlush();
         svcSleepThread(10000000ULL); // 10ms
     }
 }
@@ -245,6 +251,7 @@ static void showStatus(void)
     printf("   Current Status\n");
     printSeparator();
     printf("\n");
+    consoleFlush();
 
     PctlStatus st;
     pctl_status_fetch(&st);
@@ -265,6 +272,7 @@ static void showStatus(void)
         printf("   Restriction:     (unavailable)\n");
 
     printf("\n");
+    consoleFlush();
 
     PtState pt;
     pctl_play_timer_query(&pt);
@@ -303,8 +311,11 @@ static void menuSetPin(void)
     printf("\n");
     printf("   This will open the system PIN screen.\n");
     printf("   You can set a new PIN or change the existing one.\n\n");
+    consoleFlush();
 
     Result rc = pctl_set_pin();
+    consoleClear();
+    printf("\n");
     if (R_SUCCEEDED(rc))
         printf("   PIN set successfully!\n");
     else
@@ -324,6 +335,7 @@ static void menuUnlockTemporarily(void)
     printf("   This temporarily lifts the parental control\n");
     printf("   restriction. It reads the current PIN and\n");
     printf("   passes it back automatically.\n\n");
+    consoleFlush();
 
     Result rc = pctl_unlock_restriction_temporarily();
     if (R_SUCCEEDED(rc))
@@ -382,6 +394,7 @@ static void menuSetPlayTimer(void)
         printf("   %s [ Cancel ]\n", (!editing_value && cursor == 8) ? ">" : " ");
         printf("\n");
         printf("   A = Select/Edit   B = Cancel   X = Set All Days\n");
+        consoleFlush();
 
         if (editing_value) {
             if (k & HidNpadButton_Up)   { if (edit_val <= 65530) edit_val += 5; }
@@ -452,6 +465,7 @@ static void menuSetUniformTimer(void)
         printf("   R: Set to unlimited\n\n");
         printf("   A : Apply\n");
         printf("   B : Cancel\n");
+        consoleFlush();
 
         if (k & HidNpadButton_Up)    { if (minutes <= 65530) minutes += 5; }
         if (k & HidNpadButton_Down)  { if (minutes >= 5) minutes -= 5; else minutes = 0; }
@@ -494,6 +508,7 @@ static void menuDeleteParentalControls(void)
     printf("   WARNING: This is IRREVERSIBLE!\n");
     printf("   It will delete the PIN and ALL restrictions.\n\n");
     printf("   Press A to confirm, B to cancel.\n");
+    consoleFlush();
 
     while (appletMainLoop()) {
         u64 k = padGetDown();
@@ -509,6 +524,7 @@ static void menuDeleteParentalControls(void)
             break;
         }
         if (k & HidNpadButton_B) break;
+        consoleFlush();
         svcSleepThread(10000000ULL);
     }
 }
@@ -524,6 +540,7 @@ static void menuDeletePairing(void)
     printf("   This unlinks the Nintendo Switch Parental\n");
     printf("   Controls mobile app from this console.\n\n");
     printf("   Press A to confirm, B to cancel.\n");
+    consoleFlush();
 
     while (appletMainLoop()) {
         u64 k = padGetDown();
@@ -539,6 +556,7 @@ static void menuDeletePairing(void)
             break;
         }
         if (k & HidNpadButton_B) break;
+        consoleFlush();
         svcSleepThread(10000000ULL);
     }
 }
@@ -554,6 +572,7 @@ static void menuClearPlayTimer(void)
     printf("   This removes the daily play time limit.\n");
     printf("   The play timer will be turned off.\n\n");
     printf("   Press A to confirm, B to cancel.\n");
+    consoleFlush();
 
     while (appletMainLoop()) {
         u64 k = padGetDown();
@@ -569,6 +588,7 @@ static void menuClearPlayTimer(void)
             break;
         }
         if (k & HidNpadButton_B) break;
+        consoleFlush();
         svcSleepThread(10000000ULL);
     }
 }
@@ -579,11 +599,32 @@ int main(int argc, char **argv)
 {
     consoleInit(NULL);
 
+    // Show splash immediately so user knows app started
+    consoleClear();
+    printf("\n");
+    printSeparator();
+    printf("   Switch Parental Control Manager\n");
+    printf("   v11.2 - Compatible with fw 22.1.0\n");
+    printSeparator();
+    printf("\n");
+    printf("   Initializing...\n");
+    consoleFlush();
+
     // Initialize pad input
     initPad();
 
     // Initialize pctl service
     Result pctl_rc = pctlInitialize();
+
+    if (R_FAILED(pctl_rc)) {
+        printf("\n   !! pctl init failed: 0x%08X\n", (unsigned)pctl_rc);
+        printf("   !! Make sure you're running CFW (Atmosphere)\n");
+        printf("   !! Some features may not work.\n\n");
+        consoleFlush();
+    } else {
+        printf("   pctl service initialized OK.\n\n");
+        consoleFlush();
+    }
 
     int cursor = 0;
     const int menu_count = 8;
@@ -598,6 +639,7 @@ int main(int argc, char **argv)
         "Delete App Pairing",
     };
 
+    // Main loop
     while (appletMainLoop()) {
         u64 k = padGetDown();
 
@@ -605,7 +647,7 @@ int main(int argc, char **argv)
         printf("\n");
         printSeparator();
         printf("   Switch Parental Control Manager\n");
-        printf("   v11.0 - Compatible with fw 22.1.0\n");
+        printf("   v11.2 - Compatible with fw 22.1.0\n");
         printSeparator();
         printf("\n");
 
@@ -620,6 +662,9 @@ int main(int argc, char **argv)
 
         printf("\n");
         printf("   Up/Down: Navigate   A: Select   B: Exit\n");
+
+        // CRITICAL: flush console buffer to screen
+        consoleFlush();
 
         if (k & HidNpadButton_Up)   { if (cursor > 0) cursor--; }
         if (k & HidNpadButton_Down) { if (cursor < menu_count - 1) cursor++; }
@@ -646,7 +691,7 @@ int main(int argc, char **argv)
         svcSleepThread(50000000ULL); // 50ms
     }
 
-    pctlExit();
+    if (R_SUCCEEDED(pctl_rc)) pctlExit();
     consoleExit(NULL);
     return 0;
 }

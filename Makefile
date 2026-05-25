@@ -150,6 +150,6 @@ endif
 #---------------------------------------------------------------------------------
 APP_TITLE   := Parental Control Manager
 APP_AUTHOR  := Custom
-APP_VERSION := 11.0
+APP_VERSION := 11.2
 
 export APP_TITLE APP_AUTHOR APP_VERSION
