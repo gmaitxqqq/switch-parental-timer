@@ -1,4 +1,4 @@
-name: Build Switch ParentalTimer v9
+name: Build Parental Control Manager v11
 
 on:
   push:
@@ -27,60 +27,23 @@ jobs:
           echo "DEVKITPRO=$DEVKITPRO"
           aarch64-none-elf-gcc --version
           ls $DEVKITPRO/libnx/include/switch.h && echo "libnx found"
-          which npdmtool && echo "npdmtool found" || echo "npdmtool NOT found"
-          which nacptool && echo "nacptool found" || echo "nacptool NOT found"
-          which elf2nro && echo "elf2nro found" || echo "elf2nro NOT found"
-          which elf2nso && echo "elf2nso found" || echo "elf2nso NOT found"
+          which nacptool && echo "nacptool found"
+          which elf2nro && echo "elf2nro found"
 
-      - name: Build sysmodule
+      - name: Build NRO
         run: |
-          cd sysmodule
-          make clean 2>/dev/null || true
-          make
-
-      - name: Build companion NRO
-        run: |
-          cd companion
           make clean 2>/dev/null || true
           make
 
       - name: List outputs
         run: |
-          echo "=== Sysmodule outputs ==="
-          find sysmodule/ -name "*.nsp" -o -name "*.nso" | head -5
-          echo "=== Companion outputs ==="
-          ls -lh companion/*.nro 2>/dev/null || echo "No companion outputs"
+          echo "=== Build outputs ==="
+          ls -lh *.nro 2>/dev/null || echo "No .nro found"
+          ls -lh *.elf 2>/dev/null || echo "No .elf found"
 
-      - name: Prepare deploy structure
-        run: |
-          mkdir -p deploy/atmosphere/contents/4200000000003103/flags
-          mkdir -p deploy/switch
-
-          # Sysmodule: NSP goes to atmosphere/contents/
-          NSP_FILE=$(find sysmodule/ -name "*.nsp" -type f | head -1)
-          if [ -n "$NSP_FILE" ]; then
-            cp "$NSP_FILE" deploy/atmosphere/contents/4200000000003103/exefs.nsp
-            touch deploy/atmosphere/contents/4200000000003103/flags/boot2.flag
-            echo '{"name":"ParentalTimer","tid":"4200000000003103","requires_reboot":false}' > deploy/atmosphere/contents/4200000000003103/toolbox.json
-            echo "Sysmodule NSP packaged: $(ls -lh deploy/atmosphere/contents/4200000000003103/exefs.nsp)"
-          else
-            echo "ERROR: No .nsp file found!"
-            find sysmodule/ -type f | head -20
-            exit 1
-          fi
-
-          # Companion NRO goes to /switch/
-          if [ -f companion/parental_timer.nro ]; then
-            cp companion/parental_timer.nro deploy/switch/
-            echo "Companion NRO packaged"
-          else
-            echo "WARNING: parental_timer.nro not found"
-            ls -la companion/
-          fi
-
-      - name: Upload Full Deploy Package
+      - name: Upload NRO
         uses: actions/upload-artifact@v4
         with:
-          name: parental_timer_full_v9
-          path: deploy/
+          name: parental_control_manager_v11
+          path: parental_control_manager.nro
           retention-days: 30
