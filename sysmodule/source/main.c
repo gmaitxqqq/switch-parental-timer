@@ -1,4 +1,4 @@
-// ParentalTimer Sysmodule v3
+// ParentalTimer Sysmodule v4
 // =============================================================
 // Runs as Atmosphere sysmodule (background daemon).
 // Communicates with companion NRO via shared memory file.
@@ -9,9 +9,9 @@
 //          sd:/atmosphere/contents/4200000000000001/boot2.flag
 //
 // Communication via sd:/parental_timer.cmd:
-//   Line 1: "UNLOCK <minutes>"  → unlock parental, start timer
-//   Line 2: "STATUS"            → sysmodule writes back status
-//   Line 3: "STOP"              → stop timer and re-lock
+//   Line 1: "UNLOCK <minutes>"  -> unlock parental, start timer
+//   Line 2: "STATUS"            -> sysmodule writes back status
+//   Line 3: "STOP"              -> stop timer and re-lock
 // =============================================================
 
 #include <switch.h>
@@ -42,9 +42,7 @@ static u64 g_deadline = 0;
 static bool g_vpadReady = false;
 static HiddbgAbstractedPadState g_vpadState;
 
-// ---- File-based IPC (simple, reliable) ----
-// Companion NRO writes command to CMD_PATH
-// Sysmodule reads it, acts, writes status to STATUS_PATH
+// ---- File-based IPC ----
 
 static void writeStatus(const char *msg)
 {
@@ -63,7 +61,6 @@ static bool readCmd(char *cmd, size_t cmdSize, u32 *param)
 
     char line[128] = {0};
     if (fgets(line, sizeof(line), f)) {
-        // Parse: "UNLOCK 30" or "STOP" or "STATUS"
         if (strncmp(line, "UNLOCK", 6) == 0) {
             strncpy(cmd, "UNLOCK", cmdSize);
             *param = 15; // default
@@ -72,7 +69,7 @@ static bool readCmd(char *cmd, size_t cmdSize, u32 *param)
                 *param = (u32)mins;
             }
             fclose(f);
-            remove(CMD_PATH); // consume command
+            remove(CMD_PATH);
             return true;
         }
         if (strncmp(line, "STOP", 4) == 0) {
@@ -96,10 +93,10 @@ static bool readCmd(char *cmd, size_t cmdSize, u32 *param)
 // ---- Time helpers ----
 static u64 getUnixSeconds(void)
 {
-    TimePosixTime posix;
-    Result rc = timeGetCurrentTime(TimeType_UserSystemClock, &posix);
+    u64 timestamp = 0;
+    Result rc = timeGetCurrentTime(TimeType_UserSystemClock, &timestamp);
     if (R_FAILED(rc)) return 0;
-    return (u64)posix.seconds;
+    return timestamp;
 }
 
 // ---- Virtual pad (AbstractedPad AutoPilot, FW 5.0+) ----
@@ -110,11 +107,11 @@ static Result vpadInit(void)
 
     memset(&g_vpadState, 0, sizeof(g_vpadState));
     g_vpadState.type = 0x2; // Pro Controller
-    g_vpadState.buttons = 0;
-    g_vpadState.analog[0].x = 0x0800;
-    g_vpadState.analog[0].y = 0x0800;
-    g_vpadState.analog[1].x = 0x0800;
-    g_vpadState.analog[1].y = 0x0800;
+    g_vpadState.state.buttons = 0;
+    g_vpadState.state.analog_stick_l.x = 0x0800;
+    g_vpadState.state.analog_stick_l.y = 0x0800;
+    g_vpadState.state.analog_stick_r.x = 0x0800;
+    g_vpadState.state.analog_stick_r.y = 0x0800;
 
     rc = hiddbgSetAutoPilotVirtualPadState(0, &g_vpadState);
     if (R_FAILED(rc)) {
@@ -136,15 +133,15 @@ static void vpadCleanup(void)
     g_vpadReady = false;
 }
 
-static void pressBtn(u64 buttons, u32 holdMs, u32 gapMs)
+static void pressBtn(u32 buttons, u32 holdMs, u32 gapMs)
 {
     if (!g_vpadReady) return;
 
-    g_vpadState.buttons = buttons;
+    g_vpadState.state.buttons = buttons;
     hiddbgSetAutoPilotVirtualPadState(0, &g_vpadState);
     svcSleepThread((u64)holdMs * S_1MS);
 
-    g_vpadState.buttons = 0;
+    g_vpadState.state.buttons = 0;
     hiddbgSetAutoPilotVirtualPadState(0, &g_vpadState);
     svcSleepThread((u64)gapMs * S_1MS);
 }
@@ -155,7 +152,7 @@ static void autoDisableParental(void)
     writeStatus("UNLOCKING:navigating");
 
     // Go to Home Menu
-    pressBtn(HidNpadButton_Home, 300, 1500);
+    pressBtn(HiddbgNpadButton_Home, 300, 1500);
 
     // Navigate to System Settings
     for (int i = 0; i < 5; i++)
@@ -192,7 +189,7 @@ static void autoDisableParental(void)
     pressBtn(HidNpadButton_A, 200, 500);
 
     // Return to home
-    pressBtn(HidNpadButton_Home, 300, 800);
+    pressBtn(HiddbgNpadButton_Home, 300, 800);
 }
 
 // ---- Auto re-enable Parental Controls ----
@@ -201,7 +198,7 @@ static void autoEnableParental(void)
     writeStatus("LOCKING:closing_game");
 
     // HOME to see running game
-    pressBtn(HidNpadButton_Home, 300, 1000);
+    pressBtn(HiddbgNpadButton_Home, 300, 1000);
 
     // Close game with X
     pressBtn(HidNpadButton_X, 200, 500);
@@ -240,7 +237,7 @@ static void autoEnableParental(void)
     pressBtn(HidNpadButton_A, 200, 500);
 
     // Home
-    pressBtn(HidNpadButton_Home, 300, 800);
+    pressBtn(HiddbgNpadButton_Home, 300, 800);
 }
 
 // ---- Main sysmodule loop ----
@@ -254,8 +251,6 @@ int main(int argc, char **argv)
     // Try to initialize virtual pad
     Result rc = vpadInit();
     if (R_FAILED(rc)) {
-        // Sysmodule has higher privileges, but just in case
-        // log the error to status file
         writeStatus("ERROR:vpad_init_failed");
     }
 
