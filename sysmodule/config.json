@@ -1,15 +1,15 @@
 {
     "name": "ParentalTimer",
-    "main_thread_stack_size": "0x1000",
+    "main_thread_stack_size": "0x20000",
     "main_thread_priority": 44,
     "default_cpu_id": 3,
     "version": "0x0",
     "is_64_bit": true,
-    "address_space_type": 3,
+    "address_space_type": 1,
     "is_retail": true,
-    "pool_partition": 0,
-    "system_resource_size": "0x0",
-    "optimize_memory_allocation": false,
+    "pool_partition": 2,
+    "system_resource_size": "0x10000",
+    "optimize_memory_allocation": true,
     "disable_device_address_space_merge": false,
     "enable_alias_region_extra_size": false,
     "prevent_code_reads": false,
@@ -37,7 +37,7 @@
             "type": "kernel_flags",
             "value": {
                 "highest_thread_priority": 63,
-                "lowest_thread_priority": 0,
+                "lowest_thread_priority": 28,
                 "highest_cpu_id": 3,
                 "lowest_cpu_id": 0
             }
@@ -48,11 +48,11 @@
         },
         {
             "type": "min_kernel_version",
-            "value": "0x0020"
+            "value": "0x0060"
         },
         {
             "type": "handle_table_size",
-            "value": 512
+            "value": 128
         },
         {
             "type": "debug_flags",
